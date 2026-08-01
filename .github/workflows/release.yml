@@ -1,0 +1,214 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-publish
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ghcr.io/zenderg/sonarr-torrent-importer
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - name: Verify tag and main ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "Unsupported release tag: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Check formatting
+        run: test -z "$(gofmt -l cmd internal)"
+      - name: Test
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Validate release Compose
+        env:
+          IMPORTER_ENV_FILE: .env.example
+        run: docker compose -f compose.example.yaml config --quiet
+      - name: Verify release container
+        env:
+          IMPORTER_VERSION: release-smoke
+          BUILD_VERSION: ${{ github.ref_name }}
+          BUILD_COMMIT_SHA: ${{ github.sha }}
+          BUILD_TIME: 1970-01-01T00:00:00Z
+        run: ./scripts/verify_release_container.sh
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: verify
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ github.ref_name }}
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+          labels: |
+            org.opencontainers.image.title=sonarr-torrent-importer
+            org.opencontainers.image.description=Conservative explicit importer for Sonarr and qBittorrent
+      - name: Check immutable release tags
+        id: existing
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#v}
+          inspect_digest() {
+            local reference=$1 output error digest
+            error=$(mktemp)
+            if output=$(docker buildx imagetools inspect "$reference" 2>"$error"); then
+              rm -f "$error"
+              digest=$(awk '$1 == "Digest:" { print $2; exit }' <<< "$output")
+              if [[ -z "$digest" ]]; then
+                echo "Registry lookup for $reference succeeded without a manifest digest." >&2
+                return 2
+              fi
+              printf '%s\n' "$digest"
+              return 0
+            fi
+            if grep -Eqi '(manifest unknown|:[[:space:]]+not found([[:space:]]*$|[^[:alnum:]])|status code: 404)' "$error"; then
+              rm -f "$error"
+              return 1
+            fi
+            echo "Registry lookup for $reference failed without proving that the tag is absent:" >&2
+            cat "$error" >&2
+            rm -f "$error"
+            return 2
+          }
+
+          if digest=$(inspect_digest "$IMAGE_NAME:$GITHUB_REF_NAME"); then
+            test -n "$digest"
+            test "$(docker buildx imagetools inspect "$IMAGE_NAME:$version" | awk '$1 == "Digest:" { print $2; exit }')" = "$digest"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [[ "$status" -ne 1 ]]; then
+              exit "$status"
+            fi
+            if numeric_digest=$(inspect_digest "$IMAGE_NAME:$version"); then
+              echo "Numeric release tag already exists without matching $GITHUB_REF_NAME" >&2
+              exit 1
+            else
+              status=$?
+              if [[ "$status" -ne 1 ]]; then
+                exit "$status"
+              fi
+            fi
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build and publish image
+        id: build
+        if: steps.existing.outputs.exists != 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT_SHA=${{ github.sha }}
+            BUILD_TIME=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+          provenance: mode=max
+          sbom: true
+      - name: Attest image provenance
+        if: steps.existing.outputs.exists != 'true'
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Resolve and verify published image
+        id: image
+        env:
+          EXISTING_DIGEST: ${{ steps.existing.outputs.digest }}
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest=${BUILT_DIGEST:-$EXISTING_DIGEST}
+          test -n "$digest"
+          version=${GITHUB_REF_NAME#v}
+          test "$(docker buildx imagetools inspect "$IMAGE_NAME:$GITHUB_REF_NAME" | awk '$1 == "Digest:" { print $2; exit }')" = "$digest"
+          test "$(docker buildx imagetools inspect "$IMAGE_NAME:$version" | awk '$1 == "Digest:" { print $2; exit }')" = "$digest"
+          if [[ "$GITHUB_REF_NAME" != *-* && "${{ steps.existing.outputs.exists }}" != "true" ]]; then
+            test "$(docker buildx imagetools inspect "$IMAGE_NAME:latest" | awk '$1 == "Digest:" { print $2; exit }')" = "$digest"
+          fi
+          manifest=$(docker buildx imagetools inspect "$IMAGE_NAME@$digest")
+          grep -F 'Platform:    linux/amd64' <<< "$manifest"
+          grep -F 'Platform:    linux/arm64' <<< "$manifest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; preserving its notes."
+            exit 0
+          fi
+
+          notes=$(printf '%s\n' \
+            '## Container image' \
+            '' \
+            "\`$IMAGE_NAME:$GITHUB_REF_NAME\`" \
+            '' \
+            "Digest: \`$IMAGE_DIGEST\`" \
+            '' \
+            'Copy `compose.example.yaml` and `.env.example` from this tag, fill in the credentials, then run:' \
+            '' \
+            '```bash' \
+            'docker compose -f compose.example.yaml pull' \
+            'docker compose -f compose.example.yaml up -d' \
+            '```' \
+            '' \
+            'Phase 0 supports Sonarr v4, qBittorrent Web API 2.8.2+, and strict `[NN].mkv` episode names. Review the documented limitations before execute.')
+
+          args=("$GITHUB_REF_NAME" compose.example.yaml .env.example --draft --verify-tag --generate-notes --title "$GITHUB_REF_NAME" --notes "$notes")
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            args+=(--prerelease --latest=false)
+          fi
+          gh release create "${args[@]}"

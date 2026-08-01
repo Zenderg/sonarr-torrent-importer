@@ -1,0 +1,25 @@
+services:
+  importer:
+    image: ghcr.io/zenderg/sonarr-torrent-importer:${IMPORTER_VERSION:-v0.1.0}
+    restart: unless-stopped
+    stop_grace_period: ${IMPORTER_STOP_GRACE_PERIOD:-35m}
+    env_file:
+      - ${IMPORTER_ENV_FILE:-.env}
+    ports:
+      - "127.0.0.1:${IMPORTER_HOST_PORT:-8080}:8080"
+    volumes:
+      - importer-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+
+volumes:
+  importer-data:

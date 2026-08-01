@@ -1,0 +1,8 @@
+.git
+.github
+.env
+.env.*
+*.md
+docs
+coverage.out
+sonarr-torrent-importer

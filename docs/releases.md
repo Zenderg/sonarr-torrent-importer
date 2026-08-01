@@ -2,7 +2,7 @@
 
 Этот документ — источник истины для релизов `sonarr-torrent-importer`: он определяет итоговый артефакт, правила версионирования, публикацию Docker-образа, требования к контейнеру и пользовательское обновление. Обычные команды разработки должны быть описаны отдельно, продуктовая мотивация и исходные гипотезы остаются в [`project-context.md`](project-context.md), а проверенные ограничения и рекомендуемые границы MVP — в [`concept-review.md`](concept-review.md).
 
-Пока в репозитории нет реализации и release workflow, этот документ является согласованным контрактом для будущей реализации. Конкретные команды сборки и проверки нужно уточнить после выбора языка и runtime, не меняя описанную здесь модель поставки.
+В репозитории есть Phase 0 реализация, multi-stage Dockerfile, CI и tag-triggered release workflow. Текущие команды сборки и проверки определены в [`development.md`](development.md); этот документ остаётся контрактом публикации образа.
 
 ## Релизный контракт
 
@@ -49,7 +49,7 @@ Production-образ должен содержать только то, что 
 - собранное приложение и production-зависимости;
 - Sonarr и qBittorrent API adapters;
 - mapper и orchestration logic;
-- миграции локального состояния;
+- durable JSON safety journal и межпроцессная блокировка execute;
 - health/status endpoint;
 - необходимые CA certificates и минимальный runtime.
 
@@ -57,7 +57,7 @@ Production-образ должен содержать только то, что 
 
 - Sonarr, qBittorrent или indexer;
 - пользовательские API-ключи, пароли и tracker credentials;
-- пользовательская SQLite database;
+- пользовательский `/data` safety journal;
 - torrent data и медиатека;
 - исходники, test fixtures, компиляторы и development-зависимости, если они не нужны runtime.
 
@@ -73,7 +73,7 @@ Sonarr и qBittorrent остаются самостоятельными внеш
 - `GET /health` используется для container healthcheck;
 - процесс корректно обрабатывает `SIGTERM` и завершает текущую операцию безопасным образом;
 - при старте валидируется конфигурация, а ошибки сообщаются без вывода секретов;
-- миграции SQLite применяются до начала обработки заданий;
+- schema version durable operation journal проверяется до восстановления операции;
 - контейнер не требует Docker socket и привилегированного режима.
 
 В первоначальном importer workflow каталог downloads внутрь контейнера не монтируется. Manifest читается через qBittorrent API, а доступный Sonarr путь берётся из Sonarr manual-import API. Если позднее прямой доступ к файлам действительно понадобится, например для собственного media probe, он добавляется отдельным явно документированным read-only mount.
@@ -89,6 +89,10 @@ SONARR_API_KEY=<secret>
 QBITTORRENT_URL=<qBittorrent WebUI base URL>
 QBITTORRENT_USERNAME=<secret>
 QBITTORRENT_PASSWORD=<secret>
+REQUEST_TIMEOUT=30s
+COMMAND_TIMEOUT=10m
+WORKFLOW_TIMEOUT=30m
+POLL_INTERVAL=2s
 ```
 
 Дополнительные настройки категорий, polling и workflow добавляются по мере реализации соответствующих возможностей. Они не должны встраиваться в образ или зависеть от адресов конкретного deployment.
@@ -97,7 +101,7 @@ QBITTORRENT_PASSWORD=<secret>
 
 Dockerfile должен быть multi-stage:
 
-1. Dependency stage устанавливает зависимости из lockfile.
+1. Dependency stage устанавливает зависимости из lockfile, если выбранный ecosystem создаёт lockfile; текущий stdlib-only Go module внешних модулей не имеет.
 2. Build/validation stage выполняет обязательные статические проверки, полезные тесты и production build.
 3. Runtime stage получает только готовое приложение и production-зависимости.
 
@@ -121,8 +125,8 @@ Release workflow должен проверять не только сборку 
    - patch — совместимое исправление;
    - minor — совместимая пользовательская возможность;
    - major — несовместимое изменение конфигурации, данных или API.
-3. Обновить версию в каноническом manifest проекта и lockfile.
-4. Закоммитить подготовку релиза conventional commit сообщением:
+3. Если выбранный ecosystem хранит версию в manifest или lockfile, обновить её. Текущий Go binary получает версию из release-тега во время Docker build и отдельного version-файла не имеет.
+4. Если подготовка релиза изменила файлы, закоммитить её conventional commit сообщением:
 
    ```bash
    git add <version-files>
@@ -171,28 +175,30 @@ Conventional commit prefixes `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `t
 
 ```yaml
 services:
-  sonarr-torrent-importer:
+  importer:
     image: ghcr.io/zenderg/sonarr-torrent-importer:vX.Y.Z
     restart: unless-stopped
+    stop_grace_period: 35m
     ports:
-      - "${IMPORTER_PORT:-8080}:8080"
-    environment:
-      HOST: "0.0.0.0"
-      PORT: "8080"
-      DATA_ROOT: "/data"
-      SONARR_URL: "${SONARR_URL}"
-      SONARR_API_KEY: "${SONARR_API_KEY}"
-      QBITTORRENT_URL: "${QBITTORRENT_URL}"
-      QBITTORRENT_USERNAME: "${QBITTORRENT_USERNAME}"
-      QBITTORRENT_PASSWORD: "${QBITTORRENT_PASSWORD}"
+      - "127.0.0.1:${IMPORTER_HOST_PORT:-8080}:8080"
+    env_file:
+      - .env
     volumes:
-      - ./data:/data
+      - importer-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+
+volumes:
+  importer-data:
 ```
 
 Секреты хранятся в локальном `.env`, который не коммитится:
 
 ```dotenv
-IMPORTER_PORT=8080
+IMPORTER_HOST_PORT=8080
 SONARR_URL=http://sonarr:8989
 SONARR_API_KEY=replace-me
 QBITTORRENT_URL=http://qbittorrent:8080
@@ -205,26 +211,26 @@ QBITTORRENT_PASSWORD=replace-me
 Запуск и проверка:
 
 ```bash
-docker compose pull
-docker compose up -d
-docker compose ps
-docker compose logs --tail=100 sonarr-torrent-importer
+docker compose -f compose.example.yaml pull
+docker compose -f compose.example.yaml up -d
+docker compose -f compose.example.yaml ps
+docker compose -f compose.example.yaml logs --tail=100 importer
 ```
 
-После первого publish нужно отдельно проверить, что GHCR package публичный и связан с GitHub repository. Иначе анонимный `docker compose pull` потребует авторизацию.
+После первого publish нужно отдельно проверить, что GHCR package публичный и связан с GitHub repository. Иначе анонимный `docker compose -f compose.example.yaml pull` потребует авторизацию.
 
 ## Обновление и откат
 
 Для обновления пользователь меняет только versioned tag и перезапускает Compose:
 
 ```bash
-docker compose pull
-docker compose up -d
+docker compose -f compose.example.yaml pull
+docker compose -f compose.example.yaml up -d
 ```
 
-Перед релизом с изменением SQLite schema release notes должны явно описывать совместимость отката. Автоматический backup не считается гарантированным, пока он отдельно не реализован и не проверен; перед таким обновлением пользователь должен остановить контейнер и сохранить копию каталога `/data`.
+Перед релизом с изменением durable operation schema release notes должны явно описывать совместимость отката. Автоматический backup не считается гарантированным, пока он отдельно не реализован и не проверен; перед таким обновлением пользователь должен остановить контейнер и сохранить копию каталога `/data`.
 
-Если schema совместима с предыдущей версией, откат выполняется возвратом прежнего versioned tag и повторным `docker compose up -d`. Нельзя обещать откат только по смене образа после необратимой миграции данных.
+`v0.1.0` создаёт versioned JSON operation records и не выполняет необратимых migrations. Если schema совместима с предыдущей версией, откат выполняется возвратом прежнего versioned tag и повторным `docker compose -f compose.example.yaml up -d`. Нельзя обещать откат только по смене образа после необратимой миграции данных.
 
 ## Готовность первого релиза
 
@@ -237,6 +243,7 @@ docker compose up -d
 - все version tags релиза указывают на один digest;
 - draft GitHub Release создаётся автоматически;
 - новый deployment запускается на чистом хосте только из Compose и опубликованного образа;
-- состояние переживает пересоздание контейнера благодаря `/data` volume;
+- write-ahead operation state переживает пересоздание контейнера благодаря `/data` volume, а повтор execute не дублирует неопределённый ManualImport;
+- реальный Phase 0 workflow подтвердил import history/episode-file, сохранение active seeding, штатную queue finalization, безопасный повторный запуск и stop-on-ambiguity;
 - Sonarr и qBittorrent credentials отсутствуют в image layers, logs и repository;
 - документированный upgrade и допустимый rollback проверены вручную хотя бы один раз.

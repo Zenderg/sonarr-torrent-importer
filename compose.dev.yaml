@@ -1,0 +1,8 @@
+services:
+  importer:
+    build:
+      context: .
+      args:
+        VERSION: ${BUILD_VERSION:-dev}
+        COMMIT_SHA: ${BUILD_COMMIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
