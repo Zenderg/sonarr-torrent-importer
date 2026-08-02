@@ -154,10 +154,41 @@ func TestCopyOwnedFileCreatesIndependentVerifiedCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := filepath.Join(root, "new", "Show", "[01].mkv")
-	sourceInfo, _ := os.Stat(source)
-	targetInfo, _ := os.Stat(target)
+	sourceInfo, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetInfo, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if os.SameFile(sourceInfo, targetInfo) {
 		t.Fatal("reuse created a hardlink instead of an independent copy")
+	}
+	if targetInfo.Mode().Perm()&0o060 != 0o060 {
+		t.Fatalf("staging copy mode %o is not group-readable and writable", targetInfo.Mode().Perm())
+	}
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetGID, err := fileGroupID(targetInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootGID, err := fileGroupID(rootInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targetGID != rootGID {
+		t.Fatalf("staging copy GID %d does not match shared media GID %d", targetGID, rootGID)
+	}
+	stagingInfo, err := os.Stat(filepath.Dir(target))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stagingInfo.Mode()&os.ModeSetgid == 0 || stagingInfo.Mode().Perm()&0o070 != 0o070 {
+		t.Fatalf("staging directory mode %v does not preserve the shared media group", stagingInfo.Mode())
 	}
 	if err := os.WriteFile(target, []byte("mutated staging bytes!!"), 0o640); err != nil {
 		t.Fatal(err)

@@ -186,6 +186,20 @@ func copyRegularFileAtomic(ctx context.Context, root, source, target string, exp
 		_ = temporary.Close()
 		_ = os.Remove(temporaryPath)
 	}
+	directoryInfo, err := os.Lstat(filepath.Dir(target))
+	if err != nil {
+		cleanup()
+		return err
+	}
+	sharedGID, err := fileGroupID(directoryInfo)
+	if err != nil {
+		cleanup()
+		return err
+	}
+	if err := temporary.Chown(-1, sharedGID); err != nil {
+		cleanup()
+		return fmt.Errorf("assign shared media group to staging copy: %w", err)
+	}
 	if err := temporary.Chmod(0o660); err != nil {
 		cleanup()
 		return err
@@ -288,6 +302,10 @@ func ensureSafeDirectory(root, target string) error {
 	if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("IMPORTER_MEDIA_ROOT is not a real directory")
 	}
+	sharedGID, err := fileGroupID(rootInfo)
+	if err != nil {
+		return err
+	}
 	current := root
 	if relative == "." {
 		return nil
@@ -307,8 +325,33 @@ func ensureSafeDirectory(root, target string) error {
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("staging directory %q is not a real directory", current)
 		}
+		currentGID, err := fileGroupID(info)
+		if err != nil {
+			return err
+		}
+		needsChmod := info.Mode().Perm()&0o070 != 0o070 || info.Mode()&os.ModeSetgid == 0
+		if currentGID != sharedGID {
+			if err := os.Chown(current, -1, sharedGID); err != nil {
+				return fmt.Errorf("assign shared media group to staging directory %q: %w", current, err)
+			}
+			needsChmod = true
+		}
+		desiredMode := info.Mode().Perm() | 0o070 | os.ModeSetgid
+		if needsChmod {
+			if err := os.Chmod(current, desiredMode); err != nil {
+				return fmt.Errorf("make staging directory %q group-writable: %w", current, err)
+			}
+		}
 	}
 	return nil
+}
+
+func fileGroupID(info os.FileInfo) (int, error) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, fmt.Errorf("filesystem does not expose a Unix group ID")
+	}
+	return int(stat.Gid), nil
 }
 
 func rejectSymlinkChain(root, target string) error {

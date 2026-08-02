@@ -47,7 +47,7 @@ HTTP API в примере слушает только localhost. У серви�
 
 ### Обновляемые раздачи
 
-Раскомментируйте rolling-блок в `.env`. `QBITTORRENT_MEDIA_HOST_PATH` должен указывать на тот же host directory/volume, который qBittorrent видит как `QBITTORRENT_MEDIA_ROOT`; importer видит его как `IMPORTER_MEDIA_ROOT`. `SONARR_MEDIA_ROOT` — путь к этому же storage в namespace контейнера Sonarr (он может отличаться от qBittorrent). `QBITTORRENT_MEDIA_GID` — группа с read/write доступом к storage; она добавляется контейнеру importer как supplemental group. Каталог должен быть group-writable и желательно иметь setgid bit. Запускайте с overlay:
+Раскомментируйте rolling-блок в `.env`. `QBITTORRENT_MEDIA_HOST_PATH` должен указывать на тот же host directory/volume, который qBittorrent видит как `QBITTORRENT_MEDIA_ROOT`; importer видит его как `IMPORTER_MEDIA_ROOT`. `SONARR_MEDIA_ROOT` — путь к этому же storage в namespace контейнера Sonarr (он может отличаться от qBittorrent). `QBITTORRENT_MEDIA_GID` должен совпадать с группой media root и иметь read/write доступ к нему; Compose добавляет эту группу контейнеру importer. Importer назначает этот GID своим изолированным каталогам и создаёт staging-файлы group-writable, чтобы qBittorrent мог продолжить запись под собственным UID. Сам media root должен быть group-writable; setgid bit на нём также рекомендуется. Запускайте с overlay:
 
 ```bash
 docker compose -f compose.example.yaml -f compose.rolling.example.yaml up -d
