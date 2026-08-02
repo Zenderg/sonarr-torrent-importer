@@ -3,6 +3,20 @@ package qbittorrent
 type Versions struct {
 	Application string `json:"application"`
 	WebAPI      string `json:"webApi"`
+	Libtorrent  string `json:"libtorrent"`
+}
+
+type TorrentProperties struct {
+	PieceSize      int64 `json:"piece_size"`
+	PiecesHave     int   `json:"pieces_have"`
+	PiecesNum      int   `json:"pieces_num"`
+	CompletionDate int64 `json:"completion_date"`
+}
+
+type AddTorrentOptions struct {
+	SavePath string
+	Category string
+	Tags     string
 }
 
 type Torrent struct {
@@ -17,6 +31,8 @@ type Torrent struct {
 	Tags        string  `json:"tags"`
 	InfoHashV1  string  `json:"infohash_v1"`
 	InfoHashV2  string  `json:"infohash_v2"`
+	AddedOn     int64   `json:"added_on"`
+	ForceStart  bool    `json:"force_start"`
 }
 
 type File struct {

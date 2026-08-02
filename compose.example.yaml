@@ -1,6 +1,6 @@
 services:
   importer:
-    image: ghcr.io/zenderg/sonarr-torrent-importer:${IMPORTER_VERSION:-v1.0.0}
+    image: ghcr.io/zenderg/sonarr-torrent-importer:${IMPORTER_VERSION:-v1.1.0}
     restart: unless-stopped
     stop_grace_period: ${IMPORTER_STOP_GRACE_PERIOD:-35m}
     env_file:

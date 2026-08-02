@@ -83,8 +83,10 @@ func (c *Client) Episodes(ctx context.Context, seriesID, seasonNumber int) ([]Ep
 
 func (c *Client) ManualImportCandidates(ctx context.Context, folder, downloadID string) ([]ManualImportCandidate, error) {
 	query := url.Values{
-		"downloadId":          {downloadID},
 		"filterExistingFiles": {"true"},
+	}
+	if downloadID != "" {
+		query.Set("downloadId", downloadID)
 	}
 	if folder != "" {
 		query.Set("folder", folder)
@@ -101,10 +103,17 @@ func (c *Client) Reprocess(ctx context.Context, items []ManualImportReprocess) (
 }
 
 func (c *Client) StartManualImport(ctx context.Context, files []ManualImportFile) (Command, error) {
+	return c.StartManualImportWithMode(ctx, files, "auto")
+}
+
+func (c *Client) StartManualImportWithMode(ctx context.Context, files []ManualImportFile, importMode string) (Command, error) {
+	if importMode != "auto" && importMode != "copy" {
+		return Command{}, fmt.Errorf("unsupported Sonarr ManualImport mode %q", importMode)
+	}
 	request := ManualImportCommand{
 		Name:       "ManualImport",
 		Files:      files,
-		ImportMode: "auto",
+		ImportMode: importMode,
 	}
 	var result Command
 	err := c.doJSON(ctx, http.MethodPost, "/api/v3/command", nil, request, &result)
@@ -137,6 +146,64 @@ func (c *Client) History(ctx context.Context, downloadID string) ([]HistoryRecor
 		return nil, fmt.Errorf("Sonarr history for download %q exceeds the verification limit of %d records", downloadID, pageSize)
 	}
 	return result.Records, nil
+}
+
+// RecentImportHistory returns the bounded newest import receipts without a
+// downloadId filter. Sonarr omits downloadId from ManualImport history when
+// the source torrent was added directly rather than tracked in its queue.
+func (c *Client) RecentImportHistory(ctx context.Context) ([]HistoryRecord, error) {
+	const pageSize = 1000
+	query := url.Values{
+		"page":           {"1"},
+		"pageSize":       {strconv.Itoa(pageSize)},
+		"sortKey":        {"date"},
+		"sortDirection":  {"descending"},
+		"includeSeries":  {"false"},
+		"includeEpisode": {"false"},
+		"eventType":      {"3"},
+	}
+	var result HistoryPage
+	if err := c.doJSON(ctx, http.MethodGet, "/api/v3/history", query, nil, &result); err != nil {
+		return nil, err
+	}
+	return result.Records, nil
+}
+
+// ImportHistorySince walks newest-first import history until it reaches the
+// durable operation boundary. It prevents a busy Sonarr instance from pushing
+// the relevant receipt beyond the first page while keeping the query bounded.
+func (c *Client) ImportHistorySince(ctx context.Context, since time.Time) ([]HistoryRecord, error) {
+	const pageSize = 1000
+	const maxPages = 100
+	result := make([]HistoryRecord, 0, pageSize)
+	for pageNumber := 1; pageNumber <= maxPages; pageNumber++ {
+		query := url.Values{
+			"page":           {strconv.Itoa(pageNumber)},
+			"pageSize":       {strconv.Itoa(pageSize)},
+			"sortKey":        {"date"},
+			"sortDirection":  {"descending"},
+			"includeSeries":  {"false"},
+			"includeEpisode": {"false"},
+			"eventType":      {"3"},
+		}
+		var response HistoryPage
+		if err := c.doJSON(ctx, http.MethodGet, "/api/v3/history", query, nil, &response); err != nil {
+			return nil, err
+		}
+		for _, record := range response.Records {
+			if record.Date.IsZero() {
+				return nil, fmt.Errorf("Sonarr import history record %d has no date", record.ID)
+			}
+			if record.Date.Before(since) {
+				return result, nil
+			}
+			result = append(result, record)
+		}
+		if len(response.Records) < pageSize || pageNumber*pageSize >= response.TotalRecords {
+			return result, nil
+		}
+	}
+	return nil, fmt.Errorf("Sonarr import history since %s exceeds the safety limit of %d records", since.UTC().Format(time.RFC3339), pageSize*maxPages)
 }
 
 func (c *Client) EpisodeFiles(ctx context.Context, ids []int) ([]EpisodeFile, error) {

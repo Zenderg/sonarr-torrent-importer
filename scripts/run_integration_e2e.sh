@@ -3,6 +3,7 @@ set -eu
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 compose_project=${INTEGRATION_COMPOSE_PROJECT:-sonarr-torrent-importer-e2e}
+fixture_host_path=${INTEGRATION_FIXTURE_HOST_PATH:-"$repository_root/.integration-fixtures/$compose_project"}
 importer_port=${IMPORTER_HOST_PORT:-28080}
 sonarr_port=${SONARR_HOST_PORT:-28989}
 qbittorrent_port=${QBITTORRENT_HOST_PORT:-28081}
@@ -32,6 +33,8 @@ trap cleanup EXIT HUP INT TERM
 export IMPORTER_HOST_PORT="$importer_port"
 export SONARR_HOST_PORT="$sonarr_port"
 export QBITTORRENT_HOST_PORT="$qbittorrent_port"
+export INTEGRATION_FIXTURE_HOST_PATH="$fixture_host_path"
+export INTEGRATION_FIXTURE_ROOT="$fixture_host_path"
 
 integration_compose() {
   docker compose \

@@ -1,0 +1,10 @@
+# Add this overlay only when rolling releases are enabled. The host path must
+# be the same qBittorrent download storage that QBITTORRENT_MEDIA_ROOT names
+# inside the qBittorrent container. The importer needs read/write access to
+# create an isolated revision staging tree; it never mutates the old tree.
+services:
+  importer:
+    group_add:
+      - ${QBITTORRENT_MEDIA_GID:?set QBITTORRENT_MEDIA_GID}
+    volumes:
+      - ${QBITTORRENT_MEDIA_HOST_PATH:?set QBITTORRENT_MEDIA_HOST_PATH}:/media/qbittorrent

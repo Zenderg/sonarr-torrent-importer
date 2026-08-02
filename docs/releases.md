@@ -2,7 +2,7 @@
 
 Этот документ — источник истины для релизов `sonarr-torrent-importer`: он определяет итоговый артефакт, правила версионирования, публикацию Docker-образа, требования к контейнеру и пользовательское обновление. Обычные команды разработки описаны отдельно, а исходные продуктовые гипотезы и историческое ревью остаются в [`project-context.md`](project-context.md) и [`concept-review.md`](concept-review.md).
 
-В репозитории есть production workflow с durable qBittorrent rename recovery, Sonarr import verification, multi-stage Dockerfile, CI и tag-triggered release workflow. Текущие команды сборки и проверки определены в [`development.md`](development.md); этот документ остаётся контрактом публикации образа.
+В репозитории есть production workflow с durable qBittorrent rename recovery, Sonarr import verification, rolling revision reconciliation, multi-stage Dockerfile, CI и tag-triggered release workflow. Текущие команды сборки и проверки определены в [`development.md`](development.md); этот документ остаётся контрактом публикации образа.
 
 ## Релизный контракт
 
@@ -24,11 +24,11 @@
 
 ## Теги образа
 
-Стабильный релиз `v1.0.0` публикует один и тот же образ под тегами:
+Стабильный релиз `v1.1.0` публикует один и тот же образ под тегами:
 
 ```text
-ghcr.io/zenderg/sonarr-torrent-importer:v1.0.0
-ghcr.io/zenderg/sonarr-torrent-importer:1.0.0
+ghcr.io/zenderg/sonarr-torrent-importer:v1.1.0
+ghcr.io/zenderg/sonarr-torrent-importer:1.1.0
 ghcr.io/zenderg/sonarr-torrent-importer:latest
 ```
 
@@ -76,7 +76,7 @@ Sonarr и qBittorrent остаются самостоятельными внеш
 - schema version durable operation journal проверяется до восстановления операции;
 - контейнер не требует Docker socket и привилегированного режима.
 
-Каталог downloads внутрь importer-контейнера не монтируется. Manifest и rename postconditions читаются через qBittorrent API, а Sonarr-visible source path подтверждается через import history или manual-import API. Прямой файловый доступ importer не требуется.
+Обычному queue-based importer каталог downloads не требуется: manifest и rename postconditions читаются через qBittorrent API. Rolling releases включаются отдельным Compose overlay, который монтирует то же qBittorrent storage в importer read/write и добавляет его storage group. Доступ нужен только для revision-isolated copy/recheck; старый data tree не изменяется, hardlink не создаётся, автоматической очистки нет.
 
 Минимальная runtime-конфигурация:
 
@@ -94,6 +94,8 @@ COMMAND_TIMEOUT=10m
 WORKFLOW_TIMEOUT=30m
 POLL_INTERVAL=2s
 ```
+
+Опциональная rolling-конфигурация добавляет `PROWLARR_URL`, `PROWLARR_API_KEY`, `QBITTORRENT_MEDIA_ROOT`, `SONARR_MEDIA_ROOT`, `IMPORTER_MEDIA_ROOT`, `REVISION_POLL_INTERVAL`, а Compose overlay — `QBITTORRENT_MEDIA_HOST_PATH` и `QBITTORRENT_MEDIA_GID`. `SONARR_MEDIA_ROOT` задаёт тот же storage в namespace Sonarr и сохраняется в каждой revision как переведённый durable path. Эти изменения совместимы: без полного rolling-блока сервис запускает прежний queue-based workflow.
 
 Категории остаются настройкой Sonarr download client. Importer наблюдает ожидаемое post-import изменение категории, но не встраивает deployment-specific category names в образ.
 
@@ -230,9 +232,9 @@ docker compose -f compose.example.yaml up -d
 
 Перед релизом с изменением durable operation schema release notes должны явно описывать совместимость отката. Автоматический backup не считается гарантированным, пока он отдельно не реализован и не проверен; перед таким обновлением пользователь должен остановить контейнер и сохранить копию каталога `/data`.
 
-`v1.0.0` создаёт version 2 JSON operation records и не выполняет необратимых migrations. Незавершённую operation нельзя открывать более старым образом с другой schema. После завершения или при пустом `/data` откат выполняется возвратом прежнего versioned tag и повторным `docker compose -f compose.example.yaml up -d`. Нельзя обещать откат только по смене образа после необратимой миграции данных.
+`v1.1.0` сохраняет совместимость с version 2 JSON records обычного importer и добавляет отдельные version 1 rolling records и immutable torrent artifacts под `/data/rolling`. Необратимой миграции существующих records нет. `v1.0.0` игнорирует новый rolling-каталог, поэтому завершённая новая revision продолжит сидироваться, но больше не будет обновляться. Откат во время активной rolling operation запрещён: сначала её нужно завершить на `v1.1.0` либо сохранить `/data` и вернуть `v1.1.0` для reconciliation. Перед обновлением или откатом сохраните копию `/data`.
 
-## Готовность первого релиза
+## Готовность релиза
 
 Первый релиз считается готовым, когда выполнены все условия:
 
@@ -245,5 +247,7 @@ docker compose -f compose.example.yaml up -d
 - новый deployment запускается на чистом хосте только из Compose и опубликованного образа;
 - write-ahead operation state переживает пересоздание контейнера благодаря `/data` volume, а повтор execute не дублирует доказанный qBittorrent rename или неопределённый ManualImport;
 - реальный Compose E2E принудительно перезапустил importer в `rename_file_submitting` и подтвердил один rename-запрос, `[01].mkv` → canonical path, Sonarr auto-import, import history/episode-file, post-import category, сохранение active seeding и queue finalization;
+- rolling Compose E2E подтвердил verified reuse, `copy`-импорт только новой серии, post-import full recheck, сохранность старых байтов и ровно по одному add/delete запросу через два forced restart;
+- GitHub Release прикладывает `compose.example.yaml`, `compose.rolling.example.yaml` и `.env.example`;
 - Sonarr и qBittorrent credentials отсутствуют в image layers, logs и repository;
 - документированный upgrade и допустимый rollback проверены вручную хотя бы один раз.

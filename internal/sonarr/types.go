@@ -1,6 +1,9 @@
 package sonarr
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 type SystemStatus struct {
 	Version string `json:"version"`
@@ -134,6 +137,7 @@ type HistoryPage struct {
 
 type HistoryRecord struct {
 	ID          int               `json:"id"`
+	Date        time.Time         `json:"date"`
 	EpisodeID   int               `json:"episodeId"`
 	SeriesID    int               `json:"seriesId"`
 	SourceTitle string            `json:"sourceTitle"`

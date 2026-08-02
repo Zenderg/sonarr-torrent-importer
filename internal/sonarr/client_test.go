@@ -78,6 +78,58 @@ func TestQueueUsesDetailsEndpoint(t *testing.T) {
 	}
 }
 
+func TestManualImportCandidateDiscoveryOmitsUnknownDownloadID(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/api/v3/manualimport" || request.Method != http.MethodGet {
+			t.Errorf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+		if _, exists := request.URL.Query()["downloadId"]; exists {
+			t.Errorf("empty downloadId must be omitted, got query %s", request.URL.RawQuery)
+		}
+		if request.URL.Query().Get("folder") != "/downloads/rolling/revision" || request.URL.Query().Get("filterExistingFiles") != "true" {
+			t.Errorf("unexpected candidate query %s", request.URL.RawQuery)
+		}
+		return jsonResponse([]byte(`[]`)), nil
+	})
+
+	baseURL, _ := url.Parse("http://sonarr.test")
+	client := NewClient(baseURL, "key", time.Second)
+	client.http.Transport = transport
+	if _, err := client.ManualImportCandidates(context.Background(), "/downloads/rolling/revision", ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStartManualImportWithExplicitCopyMode(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/api/v3/command" || request.Method != http.MethodPost {
+			t.Errorf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+		var command ManualImportCommand
+		if err := json.NewDecoder(request.Body).Decode(&command); err != nil {
+			return nil, err
+		}
+		if command.Name != "ManualImport" || command.ImportMode != "copy" || len(command.Files) != 1 {
+			t.Fatalf("unexpected ManualImport command: %+v", command)
+		}
+		return jsonResponse([]byte(`{"id":42,"status":"queued"}`)), nil
+	})
+
+	baseURL, _ := url.Parse("http://sonarr.test")
+	client := NewClient(baseURL, "key", time.Second)
+	client.http.Transport = transport
+	command, err := client.StartManualImportWithMode(context.Background(), []ManualImportFile{{Path: "/downloads/episode.mkv"}}, "copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.ID != 42 {
+		t.Fatalf("unexpected command: %+v", command)
+	}
+	if _, err := client.StartManualImportWithMode(context.Background(), nil, "move"); err == nil {
+		t.Fatal("unsupported ManualImport mode was accepted")
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

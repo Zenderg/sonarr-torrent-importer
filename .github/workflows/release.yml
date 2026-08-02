@@ -46,6 +46,12 @@ jobs:
         env:
           IMPORTER_ENV_FILE: .env.example
         run: docker compose -f compose.example.yaml config --quiet
+      - name: Validate rolling Compose overlay
+        env:
+          IMPORTER_ENV_FILE: .env.example
+          QBITTORRENT_MEDIA_HOST_PATH: /tmp/qbittorrent-media
+          QBITTORRENT_MEDIA_GID: "1000"
+        run: docker compose -f compose.example.yaml -f compose.rolling.example.yaml config --quiet
       - name: Verify release container
         env:
           IMPORTER_VERSION: release-smoke
@@ -54,9 +60,18 @@ jobs:
           BUILD_TIME: 1970-01-01T00:00:00Z
         run: ./scripts/verify_release_container.sh
 
-  publish:
+  integration:
     runs-on: ubuntu-latest
     needs: verify
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Verify rolling revision recovery end to end
+        run: ./scripts/run_rolling_integration_e2e.sh
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [verify, integration]
     permissions:
       contents: write
       packages: write
@@ -85,6 +100,8 @@ jobs:
           labels: |
             org.opencontainers.image.title=sonarr-torrent-importer
             org.opencontainers.image.description=Durable canonical torrent importer for Sonarr and qBittorrent
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
       - name: Check immutable release tags
         id: existing
         shell: bash
@@ -178,6 +195,9 @@ jobs:
           manifest=$(docker buildx imagetools inspect "$IMAGE_NAME@$digest")
           grep -F 'Platform:    linux/amd64' <<< "$manifest"
           grep -F 'Platform:    linux/arm64' <<< "$manifest"
+          docker pull --platform linux/amd64 "$IMAGE_NAME@$digest"
+          test "$(docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' "$IMAGE_NAME@$digest")" = "$GITHUB_SHA"
+          test "$(docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.version\" }}' "$IMAGE_NAME@$digest")" = "$GITHUB_REF_NAME"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Create draft GitHub Release
         env:
@@ -205,9 +225,11 @@ jobs:
             'docker compose -f compose.example.yaml up -d' \
             '```' \
             '' \
-            'Supports Sonarr v4 and qBittorrent v5/Web API 2.11.0+. The importer maps strict `[NN].mkv` episode files, renames them canonically through qBittorrent, verifies Sonarr import evidence, and preserves active seeding. Review every dry-run rename plan before execute.')
+            'The queue-based importer supports Sonarr v4 and qBittorrent v5/Web API 2.11.0+.' \
+            '' \
+            'Rolling releases additionally use `compose.rolling.example.yaml`, Prowlarr, and qBittorrent Web API 2.14.0+. They preserve old content, reuse verified episode bytes, import only newly added episodes in copy mode, and retire only the old torrent record after a second complete recheck.')
 
-          args=("$GITHUB_REF_NAME" compose.example.yaml .env.example --draft --verify-tag --generate-notes --title "$GITHUB_REF_NAME" --notes "$notes")
+          args=("$GITHUB_REF_NAME" compose.example.yaml compose.rolling.example.yaml .env.example --draft --verify-tag --generate-notes --title "$GITHUB_REF_NAME" --notes "$notes")
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
             args+=(--prerelease --latest=false)
           fi

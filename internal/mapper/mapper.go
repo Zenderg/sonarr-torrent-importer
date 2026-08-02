@@ -173,7 +173,19 @@ func Map(files []File, context Context, episodes []Episode) Result {
 }
 
 func validateContext(context Context) string {
-	if context.SeriesID <= 0 || context.SeasonNumber < 0 || context.DownloadID == "" || len(context.QueueIDs) == 0 || context.Source != "sonarrQueue" {
+	if context.SeriesID <= 0 || context.SeasonNumber < 0 || context.DownloadID == "" {
+		return "INVALID_CONFIRMED_CONTEXT"
+	}
+	switch context.Source {
+	case "sonarrQueue":
+		if len(context.QueueIDs) == 0 {
+			return "INVALID_CONFIRMED_CONTEXT"
+		}
+	case "rollingRelease":
+		if len(context.QueueIDs) != 0 {
+			return "INVALID_CONFIRMED_CONTEXT"
+		}
+	default:
 		return "INVALID_CONFIRMED_CONTEXT"
 	}
 	return ""

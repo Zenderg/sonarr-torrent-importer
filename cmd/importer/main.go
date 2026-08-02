@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/zenderg/sonarr-torrent-importer/internal/config"
+	"github.com/zenderg/sonarr-torrent-importer/internal/prowlarr"
 	"github.com/zenderg/sonarr-torrent-importer/internal/qbittorrent"
+	"github.com/zenderg/sonarr-torrent-importer/internal/rolling"
 	"github.com/zenderg/sonarr-torrent-importer/internal/server"
 	"github.com/zenderg/sonarr-torrent-importer/internal/sonarr"
 	"github.com/zenderg/sonarr-torrent-importer/internal/workflow"
@@ -47,14 +49,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
-	engine, err := newEngine(cfg)
+	engine, rollingEngine, err := newEngines(cfg)
 	if err != nil {
 		return err
 	}
 
 	switch command {
 	case "serve":
-		return serve(cfg, engine)
+		return serve(cfg, engine, rollingEngine)
 	case "run":
 		return runOnce(engine, cfg.WorkflowTimeout, os.Args[2:])
 	default:
@@ -62,13 +64,25 @@ func run() error {
 	}
 }
 
-func newEngine(cfg config.Config) (*workflow.Engine, error) {
+func newEngines(cfg config.Config) (*workflow.Engine, *rolling.Engine, error) {
 	sonarrClient := sonarr.NewClient(cfg.SonarrURL, cfg.SonarrAPIKey, cfg.RequestTimeout)
 	qbitClient, err := qbittorrent.NewClient(cfg.QBittorrentURL, cfg.QBittorrentUsername, cfg.QBittorrentPassword, cfg.RequestTimeout)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return workflow.NewEngine(sonarrClient, qbitClient, cfg.CommandTimeout, cfg.WorkflowTimeout, cfg.PollInterval, cfg.DataRoot)
+	workflowEngine, err := workflow.NewEngine(sonarrClient, qbitClient, cfg.CommandTimeout, cfg.WorkflowTimeout, cfg.PollInterval, cfg.DataRoot)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !cfg.RollingEnabled() {
+		return workflowEngine, nil, nil
+	}
+	prowlarrClient := prowlarr.NewClient(cfg.ProwlarrURL, cfg.ProwlarrAPIKey, cfg.RequestTimeout)
+	rollingEngine, err := rolling.NewEngine(workflowEngine, prowlarrClient, qbitClient, sonarrClient, cfg.DataRoot, cfg.QBittorrentMediaRoot, cfg.SonarrMediaRoot, cfg.ImporterMediaRoot, cfg.PollInterval, cfg.RevisionPollInterval, cfg.CommandTimeout)
+	if err != nil {
+		return nil, nil, err
+	}
+	return workflowEngine, rollingEngine, nil
 }
 
 func runOnce(engine *workflow.Engine, workflowTimeout time.Duration, arguments []string) error {
@@ -109,9 +123,24 @@ func runOnce(engine *workflow.Engine, workflowTimeout time.Duration, arguments [
 	return err
 }
 
-func serve(cfg config.Config, engine *workflow.Engine) error {
+func serve(cfg config.Config, engine *workflow.Engine, rollingEngine *rolling.Engine) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
 	application := server.New(engine, logger, version, cfg.WorkflowTimeout)
+	if rollingEngine != nil {
+		application.SetRolling(rollingEngine)
+	}
+	workerContext, stopWorker := context.WithCancel(context.Background())
+	defer stopWorker()
+	workerDone := make(chan struct{})
+	if rollingEngine != nil {
+		go func() {
+			defer close(workerDone)
+			rollingEngine.Run(workerContext)
+		}()
+	} else {
+		close(workerDone)
+	}
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddress(),
 		Handler:           application.Handler(),
@@ -128,15 +157,17 @@ func serve(cfg config.Config, engine *workflow.Engine) error {
 
 	signals, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	var serveErr error
 	select {
 	case err := <-serverErrors:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+		if !errors.Is(err, http.ErrServerClosed) {
+			serveErr = err
 		}
-		return err
+		stopWorker()
 	case <-signals.Done():
 		logger.Info("shutdown requested")
 		stop()
+		stopWorker()
 	}
 
 	shutdownTimeout := cfg.WorkflowTimeout + cfg.RequestTimeout
@@ -145,5 +176,10 @@ func serve(cfg config.Config, engine *workflow.Engine) error {
 	if err := httpServer.Shutdown(shutdownContext); err != nil {
 		return fmt.Errorf("graceful shutdown: %w", err)
 	}
-	return nil
+	select {
+	case <-workerDone:
+	case <-shutdownContext.Done():
+		return fmt.Errorf("graceful rolling worker shutdown: %w", shutdownContext.Err())
+	}
+	return serveErr
 }

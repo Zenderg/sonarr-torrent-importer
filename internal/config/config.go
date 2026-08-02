@@ -13,18 +13,24 @@ import (
 )
 
 type Config struct {
-	Host                string
-	Port                int
-	DataRoot            string
-	SonarrURL           *url.URL
-	SonarrAPIKey        string
-	QBittorrentURL      *url.URL
-	QBittorrentUsername string
-	QBittorrentPassword string
-	RequestTimeout      time.Duration
-	CommandTimeout      time.Duration
-	WorkflowTimeout     time.Duration
-	PollInterval        time.Duration
+	Host                 string
+	Port                 int
+	DataRoot             string
+	SonarrURL            *url.URL
+	SonarrAPIKey         string
+	QBittorrentURL       *url.URL
+	QBittorrentUsername  string
+	QBittorrentPassword  string
+	ProwlarrURL          *url.URL
+	ProwlarrAPIKey       string
+	QBittorrentMediaRoot string
+	SonarrMediaRoot      string
+	ImporterMediaRoot    string
+	RequestTimeout       time.Duration
+	CommandTimeout       time.Duration
+	WorkflowTimeout      time.Duration
+	PollInterval         time.Duration
+	RevisionPollInterval time.Duration
 }
 
 func Load() (Config, error) {
@@ -36,6 +42,10 @@ func Load() (Config, error) {
 	cfg.SonarrAPIKey = strings.TrimSpace(os.Getenv("SONARR_API_KEY"))
 	cfg.QBittorrentUsername = strings.TrimSpace(os.Getenv("QBITTORRENT_USERNAME"))
 	cfg.QBittorrentPassword = os.Getenv("QBITTORRENT_PASSWORD")
+	cfg.ProwlarrAPIKey = strings.TrimSpace(os.Getenv("PROWLARR_API_KEY"))
+	cfg.QBittorrentMediaRoot = strings.TrimRight(strings.TrimSpace(os.Getenv("QBITTORRENT_MEDIA_ROOT")), "/")
+	cfg.SonarrMediaRoot = strings.TrimRight(strings.TrimSpace(os.Getenv("SONARR_MEDIA_ROOT")), "/")
+	cfg.ImporterMediaRoot = filepath.Clean(strings.TrimSpace(os.Getenv("IMPORTER_MEDIA_ROOT")))
 
 	cfg.Port, err = parseInt("PORT", envOrDefault("PORT", "8080"), 1, 65535)
 	if err != nil {
@@ -48,6 +58,12 @@ func Load() (Config, error) {
 	cfg.QBittorrentURL, err = parseBaseURL("QBITTORRENT_URL", os.Getenv("QBITTORRENT_URL"))
 	if err != nil {
 		return Config{}, err
+	}
+	if raw := strings.TrimSpace(os.Getenv("PROWLARR_URL")); raw != "" {
+		cfg.ProwlarrURL, err = parseBaseURL("PROWLARR_URL", raw)
+		if err != nil {
+			return Config{}, err
+		}
 	}
 	cfg.RequestTimeout, err = parseDuration("REQUEST_TIMEOUT", envOrDefault("REQUEST_TIMEOUT", "30s"))
 	if err != nil {
@@ -65,6 +81,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	cfg.RevisionPollInterval, err = parseDuration("REVISION_POLL_INTERVAL", envOrDefault("REVISION_POLL_INTERVAL", "15m"))
+	if err != nil {
+		return Config{}, err
+	}
 
 	if cfg.SonarrAPIKey == "" {
 		return Config{}, errors.New("SONARR_API_KEY is required")
@@ -74,6 +94,24 @@ func Load() (Config, error) {
 	}
 	if cfg.QBittorrentPassword == "" {
 		return Config{}, errors.New("QBITTORRENT_PASSWORD is required")
+	}
+	rollingConfigured := cfg.ProwlarrURL != nil || cfg.ProwlarrAPIKey != "" || cfg.QBittorrentMediaRoot != "" || cfg.SonarrMediaRoot != "" || (cfg.ImporterMediaRoot != "." && cfg.ImporterMediaRoot != "")
+	if rollingConfigured {
+		if cfg.ProwlarrURL == nil || cfg.ProwlarrAPIKey == "" {
+			return Config{}, errors.New("PROWLARR_URL and PROWLARR_API_KEY are both required when rolling releases are enabled")
+		}
+		if cfg.QBittorrentMediaRoot == "" || !strings.HasPrefix(cfg.QBittorrentMediaRoot, "/") {
+			return Config{}, errors.New("QBITTORRENT_MEDIA_ROOT must be an absolute POSIX path when rolling releases are enabled")
+		}
+		if cfg.SonarrMediaRoot == "" || !strings.HasPrefix(cfg.SonarrMediaRoot, "/") {
+			return Config{}, errors.New("SONARR_MEDIA_ROOT must be an absolute POSIX path when rolling releases are enabled")
+		}
+		if cfg.ImporterMediaRoot == "" || cfg.ImporterMediaRoot == "." || !filepath.IsAbs(cfg.ImporterMediaRoot) {
+			return Config{}, errors.New("IMPORTER_MEDIA_ROOT must be an absolute path when rolling releases are enabled")
+		}
+		if cfg.RevisionPollInterval < time.Minute {
+			return Config{}, errors.New("REVISION_POLL_INTERVAL must be at least 1m when rolling releases are enabled")
+		}
 	}
 	if cfg.Host == "" || net.ParseIP(cfg.Host) == nil {
 		return Config{}, errors.New("HOST must be an IP address")
@@ -89,6 +127,10 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func (c Config) RollingEnabled() bool {
+	return c.ProwlarrURL != nil
 }
 
 func (c Config) ListenAddress() string {

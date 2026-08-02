@@ -62,7 +62,7 @@ services:
     volumes:
       - sonarr-config:/config
       - integration-media:/media
-      - ./.integration-fixtures/downloads:/media/downloads
+      - ${INTEGRATION_FIXTURE_HOST_PATH:-./.integration-fixtures}/downloads:/media/downloads
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8989/ping"]
       interval: 5s
@@ -124,7 +124,7 @@ services:
     volumes:
       - qbittorrent-config:/config
       - integration-media:/media
-      - ./.integration-fixtures/downloads:/media/downloads
+      - ${INTEGRATION_FIXTURE_HOST_PATH:-./.integration-fixtures}/downloads:/media/downloads
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/"]
       interval: 5s
@@ -142,8 +142,10 @@ services:
     restart: unless-stopped
     environment:
       QBIT_RENAME_RESPONSE_DELAY: ${QBIT_RENAME_RESPONSE_DELAY:-10s}
+      QBIT_ADD_RESPONSE_DELAY: ${QBIT_ADD_RESPONSE_DELAY:-5s}
+      QBIT_DELETE_RESPONSE_DELAY: ${QBIT_DELETE_RESPONSE_DELAY:-5s}
     volumes:
-      - ./.integration-fixtures:/fixtures:ro
+      - ${INTEGRATION_FIXTURE_HOST_PATH:-./.integration-fixtures}:/fixtures:ro
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -160,6 +162,18 @@ services:
         condition: service_healthy
     environment:
       QBITTORRENT_URL: http://fixture-server:8080/qbittorrent
+      PROWLARR_URL: http://fixture-server:8080
+      PROWLARR_API_KEY: fixture-secret
+      QBITTORRENT_MEDIA_ROOT: /media/downloads
+      SONARR_MEDIA_ROOT: /media/downloads
+      IMPORTER_MEDIA_ROOT: /media/downloads
+      REVISION_POLL_INTERVAL: 1h
+      COMMAND_TIMEOUT: ${INTEGRATION_COMMAND_TIMEOUT:-2m}
+      WORKFLOW_TIMEOUT: ${INTEGRATION_WORKFLOW_TIMEOUT:-5m}
+    volumes:
+      - ${INTEGRATION_FIXTURE_HOST_PATH:-./.integration-fixtures}/downloads:/media/downloads
+    group_add:
+      - ${DEV_PGID:-1000}
 
 volumes:
   sonarr-config:
