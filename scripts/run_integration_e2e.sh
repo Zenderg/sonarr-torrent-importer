@@ -31,8 +31,12 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 export IMPORTER_HOST_PORT="$importer_port"
+export IMPORTER_ENV_FILE="${IMPORTER_ENV_FILE:-integration.env.example}"
 export SONARR_HOST_PORT="$sonarr_port"
 export QBITTORRENT_HOST_PORT="$qbittorrent_port"
+export SONARR_API_KEY="$sonarr_api_key"
+export QBITTORRENT_USERNAME="$qbittorrent_username"
+export QBITTORRENT_PASSWORD="$qbittorrent_password"
 export INTEGRATION_FIXTURE_HOST_PATH="$fixture_host_path"
 export INTEGRATION_FIXTURE_ROOT="$fixture_host_path"
 
