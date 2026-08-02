@@ -51,11 +51,18 @@ type FileResult struct {
 	Complete     bool                     `json:"complete"`
 	Media        bool                     `json:"media"`
 	Mapping      *mapper.Decision         `json:"mapping,omitempty"`
+	Rename       *RenameResult            `json:"rename,omitempty"`
 	SonarrPath   string                   `json:"sonarrPath,omitempty"`
 	Rejections   []sonarr.ImportRejection `json:"rejections,omitempty"`
 	Outcome      string                   `json:"outcome"`
 	Reason       string                   `json:"reason,omitempty"`
 	Verification *Verification            `json:"verification,omitempty"`
+}
+
+type RenameResult struct {
+	FromPath string `json:"fromPath"`
+	ToPath   string `json:"toPath"`
+	Status   string `json:"status"`
 }
 
 type Verification struct {
@@ -95,22 +102,27 @@ type Event struct {
 }
 
 type preparedFile struct {
-	resultIndex int
-	manifest    qbittorrent.File
-	candidate   sonarr.ManualImportCandidate
-	commandFile sonarr.ManualImportFile
+	resultIndex        int
+	manifest           qbittorrent.File
+	originalPath       string
+	targetPath         string
+	expectedSourcePath string
+	renameApplied      bool
+	candidate          sonarr.ManualImportCandidate
+	commandFile        sonarr.ManualImportFile
 }
 
 type plan struct {
-	result          Result
-	selection       Selection
-	context         mapper.Context
-	outputPath      string
-	queueRecords    []sonarr.QueueRecord
-	episodes        []sonarr.Episode
-	torrent         qbittorrent.Torrent
-	manifest        []qbittorrent.File
-	manifestSHA256  string
-	historyBaseline map[int]struct{}
-	prepared        []preparedFile
+	result           Result
+	selection        Selection
+	context          mapper.Context
+	outputPath       string
+	queueRecords     []sonarr.QueueRecord
+	episodes         []sonarr.Episode
+	torrent          qbittorrent.Torrent
+	manifest         []qbittorrent.File
+	manifestSHA256   string
+	observedCategory string
+	historyBaseline  map[int]struct{}
+	prepared         []preparedFile
 }

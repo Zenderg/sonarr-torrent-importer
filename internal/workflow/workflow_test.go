@@ -63,6 +63,27 @@ func TestCorrelateCandidateRequiresPathSizeAndContext(t *testing.T) {
 	}
 }
 
+func TestCorrelateCandidateAllowsUnparsedSeasonForExplicitMapping(t *testing.T) {
+	context := mapper.Context{SeriesID: 101, SeasonNumber: 2, DownloadID: testDownloadID}
+	candidate := sonarr.ManualImportCandidate{
+		Path: "/downloads/[03].mkv", RelativePath: "[03].mkv", Size: 100,
+		Series: &sonarr.SeriesRef{ID: 101}, SeasonNumber: nil, DownloadID: testDownloadID,
+	}
+
+	matched, err := correlateCandidate(
+		qbittorrent.File{Name: "[03].mkv", Size: 100},
+		[]sonarr.ManualImportCandidate{candidate},
+		context,
+		"/downloads/[03].mkv",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched.Path != candidate.Path {
+		t.Fatalf("got %q, want %q", matched.Path, candidate.Path)
+	}
+}
+
 func TestManifestDigestIgnoresAvailabilityButDetectsIdentityChanges(t *testing.T) {
 	torrent := qbittorrent.Torrent{Hash: testDownloadID, Name: "Clockwork Garden"}
 	files := []qbittorrent.File{{Index: 0, Name: "[03].mkv", Size: 100, Progress: 1, Priority: 1, Availability: 0.25}}
@@ -85,7 +106,8 @@ func TestManifestDigestIgnoresAvailabilityButDetectsIdentityChanges(t *testing.T
 func TestVerifyEvidenceRequiresMatchingHistoryAndEpisodeFile(t *testing.T) {
 	season := 2
 	prepared := preparedFile{
-		manifest: qbittorrent.File{Name: "Clockwork Garden/[03].mkv", Size: 100},
+		manifest:           qbittorrent.File{Name: "Clockwork Garden/[03].mkv", Size: 100},
+		expectedSourcePath: "/downloads/Clockwork Garden/[03].mkv",
 		candidate: sonarr.ManualImportCandidate{
 			Path: "/downloads/Clockwork Garden/[03].mkv", DownloadID: testDownloadID,
 		},
@@ -108,6 +130,10 @@ func TestVerifyEvidenceRequiresMatchingHistoryAndEpisodeFile(t *testing.T) {
 	}
 	if _, ok := verifyEvidence(prepared, episode, files, history, map[int]struct{}{900: {}}); ok {
 		t.Fatal("baseline history was accepted as a new import postcondition")
+	}
+	history[0].Data["droppedPath"] = "/other-root/Clockwork Garden/[03].mkv"
+	if _, ok := verifyEvidence(prepared, episode, files, history, nil); ok {
+		t.Fatal("matching relative suffix from an unbound source root was accepted")
 	}
 }
 
@@ -145,5 +171,82 @@ func TestPlanTokenUsesResolvedDownloadIdentityAndSafetySnapshot(t *testing.T) {
 	}
 	if changed == fromDownloadID {
 		t.Fatal("queue safety change did not invalidate the plan token")
+	}
+}
+
+func TestCanonicalTorrentPathUsesConfirmedSonarrMetadata(t *testing.T) {
+	target, err := canonicalTorrentPath(
+		"Futurama.Release/[01].mkv",
+		"Futurama",
+		"WEBDL-720p",
+		sonarr.Episode{SeasonNumber: 1, EpisodeNumber: 1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != "Futurama.Release/Futurama.S01E01.WEBDL-720p.mkv" {
+		t.Fatalf("target = %q", target)
+	}
+	if _, err := canonicalTorrentPath("[01].mkv", "Futurama", "WEBDL-720p", sonarr.Episode{SeasonNumber: 1, EpisodeNumber: 1}); err == nil {
+		t.Fatal("single-file torrent rename unexpectedly accepted")
+	}
+}
+
+func TestValidateRenamePlanRejectsOccupiedAndCaseFoldedTargets(t *testing.T) {
+	manifest := []qbittorrent.File{
+		{Index: 0, Name: "Release/[01].mkv"},
+		{Index: 1, Name: "Release/Futurama.S01E01.WEBDL-720p.mkv"},
+	}
+	prepared := []preparedFile{{
+		manifest: manifest[0], originalPath: manifest[0].Name,
+		targetPath: "Release/futurama.s01e01.webdl-720p.mkv",
+	}}
+	if err := validateRenamePlan(manifest, prepared); err == nil {
+		t.Fatal("case-folded occupied rename target unexpectedly accepted")
+	}
+}
+
+func TestValidTorrentPathRejectsTraversalAndControlCharacters(t *testing.T) {
+	invalid := []string{"", "/absolute.mkv", "../episode.mkv", "dir/../episode.mkv", "dir//episode.mkv", `dir\episode.mkv`, "dir/episode\x00.mkv", "dir/episode\n.mkv", "C:/episode.mkv", "C:episode.mkv"}
+	for _, value := range invalid {
+		if validTorrentPath(value) {
+			t.Errorf("invalid torrent path %q was accepted", value)
+		}
+	}
+	if !validTorrentPath("Release/[01].mkv") {
+		t.Fatal("valid torrent path was rejected")
+	}
+}
+
+func TestTorrentContentPathAllowsOnlyThePlannedFileRename(t *testing.T) {
+	original := qbittorrent.File{Index: 0, Name: "Release/[01].mkv"}
+	target := original
+	target.Name = "Release/Futurama.S01E01.WEBDL-720p.mkv"
+	built := plan{
+		torrent:  qbittorrent.Torrent{ContentPath: "/downloads/Release/[01].mkv"},
+		prepared: []preparedFile{{manifest: original, originalPath: original.Name, targetPath: target.Name}},
+	}
+	current := qbittorrent.Torrent{ContentPath: "/downloads/Release/Futurama.S01E01.WEBDL-720p.mkv"}
+	if err := validateTorrentContentPath(&built, current, []qbittorrent.File{target}); err != nil {
+		t.Fatalf("planned content_path transition was rejected: %v", err)
+	}
+	current.ContentPath = "/other/Release/Futurama.S01E01.WEBDL-720p.mkv"
+	if err := validateTorrentContentPath(&built, current, []qbittorrent.File{target}); err == nil {
+		t.Fatal("unplanned content_path transition was accepted")
+	}
+}
+
+func TestSonarrPathAfterRenameReplacesStaleQueueFilePath(t *testing.T) {
+	prepared := []preparedFile{{
+		originalPath: "Release/[01].mkv",
+		targetPath:   "Release/Futurama.S01E01.WEBDL-720p.mkv",
+	}}
+	actual, err := sonarrPathAfterRenames("/media/downloads/Release/[01].mkv", prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "/media/downloads/Release/Futurama.S01E01.WEBDL-720p.mkv"
+	if actual != expected {
+		t.Fatalf("translated Sonarr path = %q, want %q", actual, expected)
 	}
 }

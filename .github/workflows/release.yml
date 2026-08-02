@@ -84,7 +84,7 @@ jobs:
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
           labels: |
             org.opencontainers.image.title=sonarr-torrent-importer
-            org.opencontainers.image.description=Conservative explicit importer for Sonarr and qBittorrent
+            org.opencontainers.image.description=Durable canonical torrent importer for Sonarr and qBittorrent
       - name: Check immutable release tags
         id: existing
         shell: bash
@@ -205,7 +205,7 @@ jobs:
             'docker compose -f compose.example.yaml up -d' \
             '```' \
             '' \
-            'Phase 0 supports Sonarr v4, qBittorrent Web API 2.8.2+, and strict `[NN].mkv` episode names. Review the documented limitations before execute.')
+            'Supports Sonarr v4 and qBittorrent v5/Web API 2.11.0+. The importer maps strict `[NN].mkv` episode files, renames them canonically through qBittorrent, verifies Sonarr import evidence, and preserves active seeding. Review every dry-run rename plan before execute.')
 
           args=("$GITHUB_REF_NAME" compose.example.yaml .env.example --draft --verify-tag --generate-notes --title "$GITHUB_REF_NAME" --notes "$notes")
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then

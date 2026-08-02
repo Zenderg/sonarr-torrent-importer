@@ -13,13 +13,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/zenderg/sonarr-torrent-importer/internal/mapper"
 	"github.com/zenderg/sonarr-torrent-importer/internal/qbittorrent"
 	"github.com/zenderg/sonarr-torrent-importer/internal/sonarr"
 )
 
-const minimumQBittorrentWebAPI = "2.8.2"
+const minimumQBittorrentWebAPI = "2.11.0"
 
 type sonarrAPI interface {
 	SystemStatus(context.Context) (sonarr.SystemStatus, error)
@@ -39,6 +41,7 @@ type qbittorrentAPI interface {
 	Versions(context.Context) (qbittorrent.Versions, error)
 	Torrent(context.Context, string) (qbittorrent.Torrent, error)
 	Files(context.Context, string) ([]qbittorrent.File, error)
+	RenameFile(context.Context, string, string, string) error
 }
 
 type Engine struct {
@@ -133,7 +136,7 @@ func (e *Engine) buildPlan(ctx context.Context, selection Selection, mode string
 	}
 	built.result.Versions.Sonarr = status.Version
 	if majorVersion(status.Version) != 4 {
-		block(&built.result, "UNSUPPORTED_SONARR_VERSION", fmt.Sprintf("Phase 0 supports Sonarr v4; server reported %q.", status.Version))
+		block(&built.result, "UNSUPPORTED_SONARR_VERSION", fmt.Sprintf("The importer supports Sonarr v4; server reported %q.", status.Version))
 		return built, nil
 	}
 	event(&built.result, "capabilities", "ok", "Sonarr v4 capability boundary confirmed.")
@@ -147,8 +150,8 @@ func (e *Engine) buildPlan(ctx context.Context, selection Selection, mode string
 	}
 	built.result.Versions.QBittorrent = qbitVersions.Application
 	built.result.Versions.QBittorrentWebAPI = qbitVersions.WebAPI
-	if compareVersions(qbitVersions.WebAPI, minimumQBittorrentWebAPI) < 0 {
-		block(&built.result, "UNSUPPORTED_QBITTORRENT_WEBAPI", fmt.Sprintf("Phase 0 requires qBittorrent WebAPI >= %s; server reported %q.", minimumQBittorrentWebAPI, qbitVersions.WebAPI))
+	if majorVersion(qbitVersions.Application) != 5 || compareVersions(qbitVersions.WebAPI, minimumQBittorrentWebAPI) < 0 {
+		block(&built.result, "UNSUPPORTED_QBITTORRENT_VERSION", fmt.Sprintf("Canonical source renaming requires qBittorrent v5 with WebAPI >= %s; server reported application %q and WebAPI %q.", minimumQBittorrentWebAPI, qbitVersions.Application, qbitVersions.WebAPI))
 		return built, nil
 	}
 	event(&built.result, "capabilities", "ok", "qBittorrent WebAPI capability boundary confirmed.")
@@ -181,7 +184,7 @@ func (e *Engine) buildPlan(ctx context.Context, selection Selection, mode string
 	}
 	built.torrent = torrent
 	if !activeSeedingState(torrent.State) {
-		block(&built.result, "TORRENT_NOT_ACTIVE_SEEDING", fmt.Sprintf("Torrent state %q is not an active seeding state; Phase 0 will not risk Sonarr removing a stopped completed download.", torrent.State))
+		block(&built.result, "TORRENT_NOT_ACTIVE_SEEDING", fmt.Sprintf("Torrent state %q is not an active seeding state; the importer will not risk Sonarr finalizing a stopped completed download.", torrent.State))
 		return built, nil
 	}
 
@@ -204,7 +207,7 @@ func (e *Engine) buildPlan(ctx context.Context, selection Selection, mode string
 		Hash: torrent.Hash, Name: torrent.Name, State: torrent.State,
 		Category: torrent.Category, FileCount: len(manifest),
 	}
-	event(&built.result, "manifest", "ok", fmt.Sprintf("Captured immutable candidate snapshot %s with %d files.", built.manifestSHA256, len(manifest)))
+	event(&built.result, "manifest", "ok", fmt.Sprintf("Captured candidate snapshot %s with %d files.", built.manifestSHA256, len(manifest)))
 
 	mapFiles := make([]mapper.File, 0)
 	mapResultIndexes := make([]int, 0)
@@ -271,37 +274,61 @@ func (e *Engine) buildPlan(ctx context.Context, selection Selection, mode string
 	}
 	event(&built.result, "mapping", "ok", fmt.Sprintf("Mapped %d selected media files with exact evidence.", len(mapFiles)))
 
-	candidates, err := e.sonarr.ManualImportCandidates(ctx, outputPath, contextEvidence.DownloadID)
+	seriesTitle, qualityName, err := queueRenameMetadata(resolved)
 	if err != nil {
-		return built, fmt.Errorf("discover Sonarr manual-import candidates: %w", err)
-	}
-	usedCandidatePaths := make(map[string]struct{})
-	for _, resultIndex := range mapResultIndexes {
-		fileResult := &built.result.Files[resultIndex]
-		candidate, correlationErr := correlateCandidate(manifestFileByIndex(manifest, fileResult.Index), candidates, contextEvidence, outputPath)
-		if correlationErr != nil {
-			fileResult.Outcome = "blocked"
-			fileResult.Reason = "SONARR_PATH_CORRELATION_FAILED"
-			continue
-		}
-		if _, used := usedCandidatePaths[candidate.Path]; used {
-			fileResult.Outcome = "blocked"
-			fileResult.Reason = "SONARR_CANDIDATE_REUSED"
-			continue
-		}
-		usedCandidatePaths[candidate.Path] = struct{}{}
-		fileResult.SonarrPath = candidate.Path
-		built.prepared = append(built.prepared, preparedFile{
-			resultIndex: resultIndex,
-			manifest:    manifestFileByIndex(manifest, fileResult.Index),
-			candidate:   candidate,
-		})
-	}
-	if hasBlockedFile(built.result.Files) {
-		event(&built.result, "path-correlation", "blocked", "Sonarr did not expose one unique path for every selected media file.")
+		block(&built.result, "RENAME_METADATA_NOT_CONFIRMED", err.Error())
 		return built, nil
 	}
-	event(&built.result, "path-correlation", "ok", "Every qBittorrent media file matched one Sonarr-visible path by relative path, size, and download ID.")
+	episodeByID := episodesByID(episodes)
+	for _, resultIndex := range mapResultIndexes {
+		fileResult := &built.result.Files[resultIndex]
+		manifestFile := manifestFileByIndex(manifest, fileResult.Index)
+		episode, found := episodeByID[fileResult.Mapping.EpisodeIDs[0]]
+		if !found {
+			fileResult.Outcome = "blocked"
+			fileResult.Reason = "EPISODE_METADATA_DISAPPEARED"
+			continue
+		}
+		if episode.HasFile {
+			fileResult.Outcome = "blocked"
+			fileResult.Reason = "EPISODE_ALREADY_HAS_FILE"
+			continue
+		}
+		targetPath, renameErr := canonicalTorrentPath(manifestFile.Name, seriesTitle, qualityName, episode)
+		if renameErr != nil {
+			fileResult.Outcome = "blocked"
+			fileResult.Reason = "CANONICAL_RENAME_INVALID"
+			continue
+		}
+		renameStatus := "planned"
+		if targetPath == manifestFile.Name {
+			renameStatus = "not_required"
+		}
+		fileResult.Rename = &RenameResult{FromPath: manifestFile.Name, ToPath: targetPath, Status: renameStatus}
+		fileResult.Outcome = "ready"
+		built.prepared = append(built.prepared, preparedFile{
+			resultIndex: resultIndex,
+			manifest:    manifestFile, originalPath: manifestFile.Name, targetPath: targetPath,
+			candidate: sonarr.ManualImportCandidate{DownloadID: contextEvidence.DownloadID},
+		})
+	}
+	if err := validateRenamePlan(manifest, built.prepared); err != nil {
+		block(&built.result, "RENAME_PLAN_COLLISION", err.Error())
+		return built, nil
+	}
+	for index := range built.prepared {
+		expectedPath, pathErr := expectedSonarrSourcePath(outputPath, built.prepared[index], built.prepared)
+		if pathErr != nil {
+			block(&built.result, "SONARR_SOURCE_PATH_NOT_CONFIRMED", pathErr.Error())
+			return built, nil
+		}
+		built.prepared[index].expectedSourcePath = expectedPath
+	}
+	if hasBlockedFile(built.result.Files) {
+		event(&built.result, "rename-plan", "blocked", "At least one selected media file cannot be renamed safely.")
+		return built, nil
+	}
+	event(&built.result, "rename-plan", "ok", fmt.Sprintf("Planned %d canonical qBittorrent file rename(s) from confirmed Sonarr metadata.", len(built.prepared)))
 
 	history, err := e.sonarr.History(ctx, contextEvidence.DownloadID)
 	if err != nil {
@@ -311,38 +338,13 @@ func (e *Engine) buildPlan(ctx context.Context, selection Selection, mode string
 	for _, record := range history {
 		built.historyBaseline[record.ID] = struct{}{}
 	}
-	if err := e.classifyExisting(ctx, &built, history); err != nil {
-		return built, err
-	}
-	if hasBlockedFile(built.result.Files) {
-		event(&built.result, "idempotency", "blocked", "An expected episode already has a file without a matching verified import postcondition.")
-		return built, nil
-	}
-
-	pending := make([]preparedFile, 0, len(built.prepared))
-	for _, prepared := range built.prepared {
-		if built.result.Files[prepared.resultIndex].Outcome != "already_satisfied" {
-			pending = append(pending, prepared)
-		}
-	}
-	built.prepared = pending
-	if len(pending) > 0 {
-		if err := e.reprocess(ctx, &built); err != nil {
-			return built, err
-		}
-	}
-	if hasBlockedFile(built.result.Files) {
-		event(&built.result, "sonarr-reprocess", "blocked", "Sonarr rejected or changed at least one explicit mapping.")
-		return built, nil
-	}
-
 	built.result.CanExecute = true
 	built.result.Outcome = "ready"
 	built.result.PlanToken, err = calculatePlanToken(built)
 	if err != nil {
 		return built, err
 	}
-	event(&built.result, "plan", "ok", "Dry-run evidence is complete; execute remains explicitly opt-in.")
+	event(&built.result, "plan", "ok", "Dry-run evidence and canonical rename plan are complete; execute remains explicitly opt-in.")
 	return built, nil
 }
 
@@ -357,33 +359,41 @@ func calculatePlanToken(built plan) (string, error) {
 		commandFiles = append(commandFiles, prepared.commandFile)
 	}
 	payload := struct {
-		Selection         Selection                 `json:"selection"`
-		Context           mapper.Context            `json:"context"`
-		OutputPath        string                    `json:"outputPath"`
-		Queue             string                    `json:"queue"`
-		Episodes          string                    `json:"episodes"`
-		TorrentHash       string                    `json:"torrentHash"`
-		TorrentName       string                    `json:"torrentName"`
-		TorrentState      string                    `json:"torrentState"`
-		TorrentCategory   string                    `json:"torrentCategory"`
-		ManifestSHA256    string                    `json:"manifestSha256"`
-		HistoryIDs        []int                     `json:"historyIds"`
-		Files             []FileResult              `json:"files"`
-		ManualImportFiles []sonarr.ManualImportFile `json:"manualImportFiles"`
+		Selection           Selection                 `json:"selection"`
+		Context             mapper.Context            `json:"context"`
+		OutputPath          string                    `json:"outputPath"`
+		Queue               string                    `json:"queue"`
+		Episodes            string                    `json:"episodes"`
+		TorrentHash         string                    `json:"torrentHash"`
+		TorrentName         string                    `json:"torrentName"`
+		TorrentState        string                    `json:"torrentState"`
+		TorrentCategory     string                    `json:"torrentCategory"`
+		TorrentSavePath     string                    `json:"torrentSavePath"`
+		TorrentContentPath  string                    `json:"torrentContentPath"`
+		ManifestSHA256      string                    `json:"manifestSha256"`
+		ExpectedSourcePaths []string                  `json:"expectedSourcePaths"`
+		HistoryIDs          []int                     `json:"historyIds"`
+		Files               []FileResult              `json:"files"`
+		ManualImportFiles   []sonarr.ManualImportFile `json:"manualImportFiles"`
 	}{
-		Selection:         Selection{DownloadID: built.context.DownloadID},
-		Context:           built.context,
-		OutputPath:        normalizeSonarrPath(built.outputPath),
-		Queue:             queueSafetySnapshot(built.queueRecords),
-		Episodes:          episodeSnapshot(built.episodes),
-		TorrentHash:       strings.ToLower(built.torrent.Hash),
-		TorrentName:       built.torrent.Name,
-		TorrentState:      strings.ToLower(built.torrent.State),
-		TorrentCategory:   built.torrent.Category,
-		ManifestSHA256:    built.manifestSHA256,
-		HistoryIDs:        historyIDs,
-		Files:             built.result.Files,
-		ManualImportFiles: commandFiles,
+		Selection:          Selection{DownloadID: built.context.DownloadID},
+		Context:            built.context,
+		OutputPath:         normalizeSonarrPath(built.outputPath),
+		Queue:              queueSafetySnapshot(built.queueRecords),
+		Episodes:           episodeSnapshot(built.episodes),
+		TorrentHash:        strings.ToLower(built.torrent.Hash),
+		TorrentName:        built.torrent.Name,
+		TorrentState:       strings.ToLower(built.torrent.State),
+		TorrentCategory:    built.torrent.Category,
+		TorrentSavePath:    built.torrent.SavePath,
+		TorrentContentPath: built.torrent.ContentPath,
+		ManifestSHA256:     built.manifestSHA256,
+		HistoryIDs:         historyIDs,
+		Files:              built.result.Files,
+		ManualImportFiles:  commandFiles,
+	}
+	for _, prepared := range built.prepared {
+		payload.ExpectedSourcePaths = append(payload.ExpectedSourcePaths, normalizeSonarrPath(prepared.expectedSourcePath))
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -404,14 +414,19 @@ func blockedExecution(selection Selection, code, message string) Result {
 
 func (e *Engine) reprocess(ctx context.Context, built *plan) error {
 	requests := make([]sonarr.ManualImportReprocess, 0, len(built.prepared))
-	for _, prepared := range built.prepared {
+	preparedIndexes := make([]int, 0, len(built.prepared))
+	for preparedIndex, prepared := range built.prepared {
+		fileResult := &built.result.Files[prepared.resultIndex]
+		if fileResult.Outcome == "imported" || fileResult.Outcome == "already_satisfied" {
+			continue
+		}
 		candidate := prepared.candidate
 		if !rawPresent(candidate.Quality) || !rawPresent(candidate.Languages) || !rawPresent(candidate.ReleaseType) {
-			fileResult := &built.result.Files[prepared.resultIndex]
 			fileResult.Outcome = "blocked"
 			fileResult.Reason = "SONARR_CANDIDATE_ATTRIBUTES_MISSING"
 			continue
 		}
+		preparedIndexes = append(preparedIndexes, preparedIndex)
 		requests = append(requests, sonarr.ManualImportReprocess{
 			Path: candidate.Path, SeriesID: built.context.SeriesID,
 			SeasonNumber: &built.context.SeasonNumber,
@@ -429,7 +444,8 @@ func (e *Engine) reprocess(ctx context.Context, built *plan) error {
 		return fmt.Errorf("reprocess explicit Sonarr mappings: %w", err)
 	}
 	if len(responses) != len(requests) {
-		for _, prepared := range built.prepared {
+		for _, preparedIndex := range preparedIndexes {
+			prepared := built.prepared[preparedIndex]
 			fileResult := &built.result.Files[prepared.resultIndex]
 			fileResult.Outcome = "blocked"
 			fileResult.Reason = "SONARR_REPROCESS_RESPONSE_MISMATCH"
@@ -444,8 +460,8 @@ func (e *Engine) reprocess(ctx context.Context, built *plan) error {
 		}
 		byPath[response.Path] = response
 	}
-	for index := range built.prepared {
-		prepared := &built.prepared[index]
+	for _, preparedIndex := range preparedIndexes {
+		prepared := &built.prepared[preparedIndex]
 		fileResult := &built.result.Files[prepared.resultIndex]
 		response, found := byPath[prepared.candidate.Path]
 		if _, duplicate := duplicatePaths[prepared.candidate.Path]; !found || duplicate {
@@ -596,7 +612,10 @@ func correlateCandidate(file qbittorrent.File, candidates []sonarr.ManualImportC
 		if candidate.Path == "" || candidate.RelativePath == "" || candidate.Size != file.Size {
 			continue
 		}
-		if !strings.EqualFold(candidate.DownloadID, context.DownloadID) || candidate.Series == nil || candidate.Series.ID != context.SeriesID || candidate.SeasonNumber == nil || *candidate.SeasonNumber != context.SeasonNumber {
+		if !strings.EqualFold(candidate.DownloadID, context.DownloadID) || candidate.Series == nil || candidate.Series.ID != context.SeriesID {
+			continue
+		}
+		if candidate.SeasonNumber != nil && *candidate.SeasonNumber != context.SeasonNumber {
 			continue
 		}
 		if !pathWithin(candidate.Path, outputPath) {
@@ -620,6 +639,7 @@ func validateManifest(files []qbittorrent.File) error {
 	}
 	indexes := make(map[int]struct{}, len(files))
 	paths := make(map[string]struct{}, len(files))
+	foldedPaths := make(map[string]string, len(files))
 	for _, file := range files {
 		if file.Index < 0 {
 			return fmt.Errorf("manifest has a negative file index")
@@ -632,8 +652,157 @@ func validateManifest(files []qbittorrent.File) error {
 			return fmt.Errorf("manifest repeats relative path %q", file.Name)
 		}
 		paths[file.Name] = struct{}{}
-		if file.Name == "" || file.Size < 0 || file.Priority < 0 || math.IsNaN(file.Progress) || math.IsInf(file.Progress, 0) || file.Progress < 0 || file.Progress > 1 {
+		folded := strings.ToLower(file.Name)
+		if previous, exists := foldedPaths[folded]; exists {
+			return fmt.Errorf("manifest paths %q and %q differ only by case", previous, file.Name)
+		}
+		foldedPaths[folded] = file.Name
+		if !validTorrentPath(file.Name) || file.Size < 0 || file.Priority < 0 || math.IsNaN(file.Progress) || math.IsInf(file.Progress, 0) || file.Progress < 0 || file.Progress > 1 {
 			return fmt.Errorf("manifest file %d has invalid metadata", file.Index)
+		}
+	}
+	return nil
+}
+
+func validTorrentPath(value string) bool {
+	if value == "" || len(value) > 4096 || !utf8.ValidString(value) || strings.HasPrefix(value, "/") || strings.Contains(value, `\`) || strings.ContainsRune(value, '\x00') || path.Clean(value) != value || value == "." {
+		return false
+	}
+	if len(value) >= 2 && ((value[0] >= 'A' && value[0] <= 'Z') || (value[0] >= 'a' && value[0] <= 'z')) && value[1] == ':' {
+		return false
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+		for _, character := range segment {
+			if unicode.IsControl(character) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func queueRenameMetadata(records []sonarr.QueueRecord) (string, string, error) {
+	seriesTitles := make(map[string]string)
+	qualityNames := make(map[string]string)
+	for _, record := range records {
+		if record.Series == nil || strings.TrimSpace(record.Series.Title) == "" {
+			return "", "", fmt.Errorf("queue item %d lacks a series title required for canonical filenames", record.ID)
+		}
+		seriesTitle := strings.TrimSpace(record.Series.Title)
+		seriesTitles[strings.ToLower(seriesTitle)] = seriesTitle
+		qualityName, err := queueQualityName(record.Quality)
+		if err != nil {
+			return "", "", fmt.Errorf("queue item %d: %w", record.ID, err)
+		}
+		qualityNames[strings.ToLower(qualityName)] = qualityName
+	}
+	if len(seriesTitles) != 1 || len(qualityNames) != 1 {
+		return "", "", fmt.Errorf("queue items do not agree on one series title and quality")
+	}
+	return onlyStringMapValue(seriesTitles), onlyStringMapValue(qualityNames), nil
+}
+
+func queueQualityName(raw json.RawMessage) (string, error) {
+	var value struct {
+		Quality struct {
+			Name string `json:"name"`
+		} `json:"quality"`
+	}
+	if !rawPresent(raw) || json.Unmarshal(raw, &value) != nil || strings.TrimSpace(value.Quality.Name) == "" {
+		return "", fmt.Errorf("quality metadata is missing or invalid")
+	}
+	return strings.TrimSpace(value.Quality.Name), nil
+}
+
+func canonicalTorrentPath(source, seriesTitle, qualityName string, episode sonarr.Episode) (string, error) {
+	if !validTorrentPath(source) || episode.SeasonNumber < 0 || episode.EpisodeNumber <= 0 {
+		return "", fmt.Errorf("source path or episode metadata is invalid")
+	}
+	if path.Dir(source) == "." {
+		return "", fmt.Errorf("single-file torrent rename is not supported because the Sonarr output path may become stale")
+	}
+	extension := path.Ext(source)
+	if !isMediaPath("file" + extension) {
+		return "", fmt.Errorf("source extension %q is not supported media", extension)
+	}
+	seriesToken := canonicalFilenameToken(seriesTitle)
+	qualityToken := canonicalFilenameToken(qualityName)
+	if seriesToken == "" || qualityToken == "" {
+		return "", fmt.Errorf("series title or quality cannot form a canonical filename")
+	}
+	base := fmt.Sprintf("%s.S%02dE%02d.%s%s", seriesToken, episode.SeasonNumber, episode.EpisodeNumber, qualityToken, extension)
+	if len(base) > 240 || strings.HasSuffix(base, ".") || strings.HasSuffix(base, " ") {
+		return "", fmt.Errorf("canonical filename is not safe for qBittorrent")
+	}
+	target := base
+	if parent := path.Dir(source); parent != "." {
+		target = parent + "/" + base
+	}
+	if !validTorrentPath(target) || path.Dir(target) != path.Dir(source) {
+		return "", fmt.Errorf("canonical target is not a safe same-directory path")
+	}
+	return target, nil
+}
+
+func canonicalFilenameToken(value string) string {
+	var builder strings.Builder
+	separator := false
+	for _, character := range strings.TrimSpace(value) {
+		switch {
+		case unicode.IsLetter(character) || unicode.IsDigit(character):
+			if separator && builder.Len() > 0 {
+				builder.WriteByte('.')
+			}
+			separator = false
+			builder.WriteRune(character)
+		case character == '-':
+			if builder.Len() > 0 && !separator {
+				builder.WriteRune(character)
+			}
+		default:
+			separator = true
+		}
+	}
+	return strings.Trim(builder.String(), ".-")
+}
+
+func validateRenamePlan(manifest []qbittorrent.File, prepared []preparedFile) error {
+	occupied := make(map[string]qbittorrent.File, len(manifest))
+	sources := make(map[string]struct{}, len(prepared))
+	for _, file := range manifest {
+		occupied[strings.ToLower(file.Name)] = file
+	}
+	for _, file := range prepared {
+		sources[strings.ToLower(file.originalPath)] = struct{}{}
+	}
+	targets := make(map[string]string, len(prepared))
+	for _, file := range prepared {
+		if path.Dir(file.originalPath) != path.Dir(file.targetPath) {
+			return fmt.Errorf("rename %q to %q would change directories", file.originalPath, file.targetPath)
+		}
+		foldedSource := strings.ToLower(file.originalPath)
+		foldedTarget := strings.ToLower(file.targetPath)
+		if foldedSource == foldedTarget && file.originalPath != file.targetPath {
+			return fmt.Errorf("case-only rename %q to %q is not supported", file.originalPath, file.targetPath)
+		}
+		if previous, exists := targets[foldedTarget]; exists && previous != file.targetPath {
+			return fmt.Errorf("rename targets %q and %q collide", previous, file.targetPath)
+		}
+		if _, exists := targets[foldedTarget]; exists {
+			return fmt.Errorf("rename target %q is repeated", file.targetPath)
+		}
+		targets[foldedTarget] = file.targetPath
+		if foldedTarget == foldedSource && file.targetPath == file.originalPath {
+			continue
+		}
+		if occupiedFile, exists := occupied[foldedTarget]; exists {
+			return fmt.Errorf("rename target %q is already occupied by manifest file %d", file.targetPath, occupiedFile.Index)
+		}
+		if _, isAnotherSource := sources[foldedTarget]; isAnotherSource {
+			return fmt.Errorf("rename target %q overlaps another rename source", file.targetPath)
 		}
 	}
 	return nil
@@ -648,10 +817,15 @@ func manifestDigest(torrent qbittorrent.Torrent, files []qbittorrent.File) (stri
 		Priority int     `json:"priority"`
 	}
 	snapshot := struct {
-		Hash  string         `json:"hash"`
-		Name  string         `json:"name"`
-		Files []fileSnapshot `json:"files"`
-	}{Hash: strings.ToLower(torrent.Hash), Name: torrent.Name, Files: make([]fileSnapshot, 0, len(files))}
+		Hash     string         `json:"hash"`
+		Name     string         `json:"name"`
+		SavePath string         `json:"savePath"`
+		Files    []fileSnapshot `json:"files"`
+	}{
+		Hash: strings.ToLower(torrent.Hash), Name: torrent.Name,
+		SavePath: torrent.SavePath,
+		Files:    make([]fileSnapshot, 0, len(files)),
+	}
 	for _, file := range files {
 		snapshot.Files = append(snapshot.Files, fileSnapshot{
 			Index: file.Index, Name: file.Name, Size: file.Size,

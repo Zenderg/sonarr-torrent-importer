@@ -16,7 +16,7 @@ import (
 	"github.com/zenderg/sonarr-torrent-importer/internal/sonarr"
 )
 
-const operationRecordVersion = 1
+const operationRecordVersion = 2
 
 var errExecutionLocked = errors.New("another execute workflow holds the persistent operation lock")
 
@@ -40,24 +40,29 @@ type operationRecord struct {
 }
 
 type persistedPlan struct {
-	Result          Result               `json:"result"`
-	Selection       Selection            `json:"selection"`
-	Context         mapper.Context       `json:"context"`
-	OutputPath      string               `json:"outputPath"`
-	QueueRecords    []sonarr.QueueRecord `json:"queueRecords"`
-	Episodes        []sonarr.Episode     `json:"episodes"`
-	Torrent         qbittorrent.Torrent  `json:"torrent"`
-	Manifest        []qbittorrent.File   `json:"manifest"`
-	ManifestSHA256  string               `json:"manifestSha256"`
-	HistoryBaseline []int                `json:"historyBaseline"`
-	Prepared        []persistedPrepared  `json:"prepared"`
+	Result           Result               `json:"result"`
+	Selection        Selection            `json:"selection"`
+	Context          mapper.Context       `json:"context"`
+	OutputPath       string               `json:"outputPath"`
+	QueueRecords     []sonarr.QueueRecord `json:"queueRecords"`
+	Episodes         []sonarr.Episode     `json:"episodes"`
+	Torrent          qbittorrent.Torrent  `json:"torrent"`
+	Manifest         []qbittorrent.File   `json:"manifest"`
+	ManifestSHA256   string               `json:"manifestSha256"`
+	ObservedCategory string               `json:"observedCategory,omitempty"`
+	HistoryBaseline  []int                `json:"historyBaseline"`
+	Prepared         []persistedPrepared  `json:"prepared"`
 }
 
 type persistedPrepared struct {
-	ResultIndex int                          `json:"resultIndex"`
-	Manifest    qbittorrent.File             `json:"manifest"`
-	Candidate   sonarr.ManualImportCandidate `json:"candidate"`
-	CommandFile sonarr.ManualImportFile      `json:"commandFile"`
+	ResultIndex        int                          `json:"resultIndex"`
+	Manifest           qbittorrent.File             `json:"manifest"`
+	OriginalPath       string                       `json:"originalPath"`
+	TargetPath         string                       `json:"targetPath"`
+	ExpectedSourcePath string                       `json:"expectedSourcePath"`
+	RenameApplied      bool                         `json:"renameApplied"`
+	Candidate          sonarr.ManualImportCandidate `json:"candidate"`
+	CommandFile        sonarr.ManualImportFile      `json:"commandFile"`
 }
 
 func newOperationStore(dataRoot string) (*operationStore, error) {
@@ -208,24 +213,29 @@ func persistPlan(built plan) persistedPlan {
 	prepared := make([]persistedPrepared, 0, len(built.prepared))
 	for _, file := range built.prepared {
 		prepared = append(prepared, persistedPrepared{
-			ResultIndex: file.resultIndex,
-			Manifest:    file.manifest,
-			Candidate:   file.candidate,
-			CommandFile: file.commandFile,
+			ResultIndex:        file.resultIndex,
+			Manifest:           file.manifest,
+			OriginalPath:       file.originalPath,
+			TargetPath:         file.targetPath,
+			ExpectedSourcePath: file.expectedSourcePath,
+			RenameApplied:      file.renameApplied,
+			Candidate:          file.candidate,
+			CommandFile:        file.commandFile,
 		})
 	}
 	return persistedPlan{
-		Result:          built.result,
-		Selection:       built.selection,
-		Context:         built.context,
-		OutputPath:      built.outputPath,
-		QueueRecords:    append([]sonarr.QueueRecord(nil), built.queueRecords...),
-		Episodes:        append([]sonarr.Episode(nil), built.episodes...),
-		Torrent:         built.torrent,
-		Manifest:        append([]qbittorrent.File(nil), built.manifest...),
-		ManifestSHA256:  built.manifestSHA256,
-		HistoryBaseline: baseline,
-		Prepared:        prepared,
+		Result:           built.result,
+		Selection:        built.selection,
+		Context:          built.context,
+		OutputPath:       built.outputPath,
+		QueueRecords:     append([]sonarr.QueueRecord(nil), built.queueRecords...),
+		Episodes:         append([]sonarr.Episode(nil), built.episodes...),
+		Torrent:          built.torrent,
+		Manifest:         append([]qbittorrent.File(nil), built.manifest...),
+		ManifestSHA256:   built.manifestSHA256,
+		ObservedCategory: built.observedCategory,
+		HistoryBaseline:  baseline,
+		Prepared:         prepared,
 	}
 }
 
@@ -237,23 +247,28 @@ func restorePlan(saved persistedPlan) plan {
 	prepared := make([]preparedFile, 0, len(saved.Prepared))
 	for _, file := range saved.Prepared {
 		prepared = append(prepared, preparedFile{
-			resultIndex: file.ResultIndex,
-			manifest:    file.Manifest,
-			candidate:   file.Candidate,
-			commandFile: file.CommandFile,
+			resultIndex:        file.ResultIndex,
+			manifest:           file.Manifest,
+			originalPath:       file.OriginalPath,
+			targetPath:         file.TargetPath,
+			expectedSourcePath: file.ExpectedSourcePath,
+			renameApplied:      file.RenameApplied,
+			candidate:          file.Candidate,
+			commandFile:        file.CommandFile,
 		})
 	}
 	return plan{
-		result:          saved.Result,
-		selection:       saved.Selection,
-		context:         saved.Context,
-		outputPath:      saved.OutputPath,
-		queueRecords:    append([]sonarr.QueueRecord(nil), saved.QueueRecords...),
-		episodes:        append([]sonarr.Episode(nil), saved.Episodes...),
-		torrent:         saved.Torrent,
-		manifest:        append([]qbittorrent.File(nil), saved.Manifest...),
-		manifestSHA256:  saved.ManifestSHA256,
-		historyBaseline: baseline,
-		prepared:        prepared,
+		result:           saved.Result,
+		selection:        saved.Selection,
+		context:          saved.Context,
+		outputPath:       saved.OutputPath,
+		queueRecords:     append([]sonarr.QueueRecord(nil), saved.QueueRecords...),
+		episodes:         append([]sonarr.Episode(nil), saved.Episodes...),
+		torrent:          saved.Torrent,
+		manifest:         append([]qbittorrent.File(nil), saved.Manifest...),
+		manifestSHA256:   saved.ManifestSHA256,
+		observedCategory: saved.ObservedCategory,
+		historyBaseline:  baseline,
+		prepared:         prepared,
 	}
 }

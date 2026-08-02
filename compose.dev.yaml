@@ -1,5 +1,6 @@
 services:
   importer:
+    image: sonarr-torrent-importer:${IMPORTER_DEV_TAG:-dev}
     build:
       context: .
       args:

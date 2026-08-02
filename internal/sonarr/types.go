@@ -15,21 +15,22 @@ type QueuePage struct {
 }
 
 type QueueRecord struct {
-	ID                                  int        `json:"id"`
-	SeriesID                            *int       `json:"seriesId"`
-	EpisodeID                           *int       `json:"episodeId"`
-	SeasonNumber                        *int       `json:"seasonNumber"`
-	Title                               string     `json:"title"`
-	Status                              string     `json:"status"`
-	TrackedDownloadStatus               string     `json:"trackedDownloadStatus"`
-	TrackedDownloadState                string     `json:"trackedDownloadState"`
-	DownloadID                          string     `json:"downloadId"`
-	Protocol                            string     `json:"protocol"`
-	DownloadClient                      string     `json:"downloadClient"`
-	DownloadClientHasPostImportCategory bool       `json:"downloadClientHasPostImportCategory"`
-	OutputPath                          string     `json:"outputPath"`
-	Series                              *SeriesRef `json:"series"`
-	Episode                             *Episode   `json:"episode"`
+	ID                                  int             `json:"id"`
+	SeriesID                            *int            `json:"seriesId"`
+	EpisodeID                           *int            `json:"episodeId"`
+	SeasonNumber                        *int            `json:"seasonNumber"`
+	Title                               string          `json:"title"`
+	Status                              string          `json:"status"`
+	TrackedDownloadStatus               string          `json:"trackedDownloadStatus"`
+	TrackedDownloadState                string          `json:"trackedDownloadState"`
+	DownloadID                          string          `json:"downloadId"`
+	Protocol                            string          `json:"protocol"`
+	DownloadClient                      string          `json:"downloadClient"`
+	DownloadClientHasPostImportCategory bool            `json:"downloadClientHasPostImportCategory"`
+	OutputPath                          string          `json:"outputPath"`
+	Quality                             json.RawMessage `json:"quality"`
+	Series                              *SeriesRef      `json:"series"`
+	Episode                             *Episode        `json:"episode"`
 }
 
 type SeriesRef struct {

@@ -1,13 +1,13 @@
 # Release Workflow
 
-Этот документ — источник истины для релизов `sonarr-torrent-importer`: он определяет итоговый артефакт, правила версионирования, публикацию Docker-образа, требования к контейнеру и пользовательское обновление. Обычные команды разработки должны быть описаны отдельно, продуктовая мотивация и исходные гипотезы остаются в [`project-context.md`](project-context.md), а проверенные ограничения и рекомендуемые границы MVP — в [`concept-review.md`](concept-review.md).
+Этот документ — источник истины для релизов `sonarr-torrent-importer`: он определяет итоговый артефакт, правила версионирования, публикацию Docker-образа, требования к контейнеру и пользовательское обновление. Обычные команды разработки описаны отдельно, а исходные продуктовые гипотезы и историческое ревью остаются в [`project-context.md`](project-context.md) и [`concept-review.md`](concept-review.md).
 
-В репозитории есть Phase 0 реализация, multi-stage Dockerfile, CI и tag-triggered release workflow. Текущие команды сборки и проверки определены в [`development.md`](development.md); этот документ остаётся контрактом публикации образа.
+В репозитории есть production workflow с durable qBittorrent rename recovery, Sonarr import verification, multi-stage Dockerfile, CI и tag-triggered release workflow. Текущие команды сборки и проверки определены в [`development.md`](development.md); этот документ остаётся контрактом публикации образа.
 
 ## Релизный контракт
 
 - Релизы выпускаются только из ветки `main`.
-- Версии следуют Semantic Versioning и используют Git-теги `vX.Y.Z`, например `v0.1.0`.
+- Версии следуют Semantic Versioning и используют Git-теги `vX.Y.Z`, например `v1.0.0`.
 - Главный и единственный deployable-артефакт релиза — готовый OCI/Docker-образ. Для запуска пользователю не нужны checkout репозитория, компилятор или package manager.
 - Образ публикуется в GitHub Container Registry:
 
@@ -24,17 +24,17 @@
 
 ## Теги образа
 
-Стабильный релиз `v0.1.0` публикует один и тот же образ под тегами:
+Стабильный релиз `v1.0.0` публикует один и тот же образ под тегами:
 
 ```text
-ghcr.io/zenderg/sonarr-torrent-importer:v0.1.0
-ghcr.io/zenderg/sonarr-torrent-importer:0.1.0
+ghcr.io/zenderg/sonarr-torrent-importer:v1.0.0
+ghcr.io/zenderg/sonarr-torrent-importer:1.0.0
 ghcr.io/zenderg/sonarr-torrent-importer:latest
 ```
 
 Все три ссылки должны разрешаться в один digest. Версионированный тег — рекомендуемый вариант для Docker Compose; `latest` предназначен только для ручного ознакомления и не гарантирует воспроизводимое обновление.
 
-Предварительные версии используют теги вида `v0.2.0-rc.1`. Они не обновляют `latest`.
+Предварительные версии используют теги вида `v1.1.0-rc.1`. Они не обновляют `latest`.
 
 При необходимости точной фиксации пользователь может указать digest:
 
@@ -76,7 +76,7 @@ Sonarr и qBittorrent остаются самостоятельными внеш
 - schema version durable operation journal проверяется до восстановления операции;
 - контейнер не требует Docker socket и привилегированного режима.
 
-В первоначальном importer workflow каталог downloads внутрь контейнера не монтируется. Manifest читается через qBittorrent API, а доступный Sonarr путь берётся из Sonarr manual-import API. Если позднее прямой доступ к файлам действительно понадобится, например для собственного media probe, он добавляется отдельным явно документированным read-only mount.
+Каталог downloads внутрь importer-контейнера не монтируется. Manifest и rename postconditions читаются через qBittorrent API, а Sonarr-visible source path подтверждается через import history или manual-import API. Прямой файловый доступ importer не требуется.
 
 Минимальная runtime-конфигурация:
 
@@ -95,7 +95,7 @@ WORKFLOW_TIMEOUT=30m
 POLL_INTERVAL=2s
 ```
 
-Дополнительные настройки категорий, polling и workflow добавляются по мере реализации соответствующих возможностей. Они не должны встраиваться в образ или зависеть от адресов конкретного deployment.
+Категории остаются настройкой Sonarr download client. Importer наблюдает ожидаемое post-import изменение категории, но не встраивает deployment-specific category names в образ.
 
 ## Требования к Docker-сборке
 
@@ -230,7 +230,7 @@ docker compose -f compose.example.yaml up -d
 
 Перед релизом с изменением durable operation schema release notes должны явно описывать совместимость отката. Автоматический backup не считается гарантированным, пока он отдельно не реализован и не проверен; перед таким обновлением пользователь должен остановить контейнер и сохранить копию каталога `/data`.
 
-`v0.1.0` создаёт versioned JSON operation records и не выполняет необратимых migrations. Если schema совместима с предыдущей версией, откат выполняется возвратом прежнего versioned tag и повторным `docker compose -f compose.example.yaml up -d`. Нельзя обещать откат только по смене образа после необратимой миграции данных.
+`v1.0.0` создаёт version 2 JSON operation records и не выполняет необратимых migrations. Незавершённую operation нельзя открывать более старым образом с другой schema. После завершения или при пустом `/data` откат выполняется возвратом прежнего versioned tag и повторным `docker compose -f compose.example.yaml up -d`. Нельзя обещать откат только по смене образа после необратимой миграции данных.
 
 ## Готовность первого релиза
 
@@ -243,7 +243,7 @@ docker compose -f compose.example.yaml up -d
 - все version tags релиза указывают на один digest;
 - draft GitHub Release создаётся автоматически;
 - новый deployment запускается на чистом хосте только из Compose и опубликованного образа;
-- write-ahead operation state переживает пересоздание контейнера благодаря `/data` volume, а повтор execute не дублирует неопределённый ManualImport;
-- реальный Phase 0 workflow подтвердил import history/episode-file, сохранение active seeding, штатную queue finalization, безопасный повторный запуск и stop-on-ambiguity;
+- write-ahead operation state переживает пересоздание контейнера благодаря `/data` volume, а повтор execute не дублирует доказанный qBittorrent rename или неопределённый ManualImport;
+- реальный Compose E2E принудительно перезапустил importer в `rename_file_submitting` и подтвердил один rename-запрос, `[01].mkv` → canonical path, Sonarr auto-import, import history/episode-file, post-import category, сохранение active seeding и queue finalization;
 - Sonarr и qBittorrent credentials отсутствуют в image layers, logs и repository;
 - документированный upgrade и допустимый rollback проверены вручную хотя бы один раз.

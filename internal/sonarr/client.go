@@ -134,7 +134,7 @@ func (c *Client) History(ctx context.Context, downloadID string) ([]HistoryRecor
 		return nil, err
 	}
 	if result.TotalRecords > pageSize {
-		return nil, fmt.Errorf("Sonarr history for download %q exceeds the Phase 0 verification limit of %d records", downloadID, pageSize)
+		return nil, fmt.Errorf("Sonarr history for download %q exceeds the verification limit of %d records", downloadID, pageSize)
 	}
 	return result.Records, nil
 }

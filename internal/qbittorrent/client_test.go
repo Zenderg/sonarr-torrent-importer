@@ -2,6 +2,7 @@ package qbittorrent
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -33,6 +34,15 @@ func TestAuthenticatedManifestContract(t *testing.T) {
 				t.Errorf("got hash %q", request.URL.Query().Get("hash"))
 			}
 			return textResponse(`[{"index":0,"name":"[03].mkv","size":100,"progress":1,"priority":1,"availability":0.5}]`, ""), nil
+		case "/api/v2/torrents/renameFile":
+			requireSession(t, request)
+			if err := request.ParseForm(); err != nil {
+				return nil, err
+			}
+			if request.Form.Get("hash") != "abc" || request.Form.Get("oldPath") != "[03].mkv" || request.Form.Get("newPath") != "Clockwork.Garden.S02E03.WEBDL-1080p.mkv" {
+				t.Errorf("unexpected rename form: %v", request.Form)
+			}
+			return textResponse("", ""), nil
 		default:
 			return &http.Response{StatusCode: http.StatusNotFound, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("not found"))}, nil
 		}
@@ -60,6 +70,30 @@ func TestAuthenticatedManifestContract(t *testing.T) {
 	}
 	if len(files) != 1 || files[0].Index != 0 || files[0].Priority != 1 || files[0].Progress != 1 {
 		t.Fatalf("unexpected manifest: %+v", files)
+	}
+	if err := client.RenameFile(context.Background(), "abc", "[03].mkv", "Clockwork.Garden.S02E03.WEBDL-1080p.mkv"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRenameFilePreservesConflictResponse(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusConflict,
+			Header:     http.Header{},
+			Body:       io.NopCloser(strings.NewReader("newPath already in use")),
+		}, nil
+	})
+	baseURL, _ := url.Parse("http://qbittorrent.test")
+	client, err := NewClient(baseURL, "user", "password", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.http.Transport = transport
+	err = client.RenameFile(context.Background(), "abc", "Release/[01].mkv", "Release/S01E01.mkv")
+	var apiError *APIError
+	if !errors.As(err, &apiError) || apiError.StatusCode != http.StatusConflict {
+		t.Fatalf("rename conflict = %v, want typed HTTP 409", err)
 	}
 }
 

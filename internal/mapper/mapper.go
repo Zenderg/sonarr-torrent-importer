@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	MapperID      = "phase0-season-relative"
+	MapperID      = "season-relative-bracketed"
 	MapperVersion = 1
 	RuleID        = "season-relative-bracketed-two-digit-mkv"
 	RuleVersion   = 1
@@ -108,7 +108,7 @@ func Map(files []File, context Context, episodes []Episode) Result {
 
 		matches := bracketedEpisodePattern.FindStringSubmatch(path.Base(file.RelativePath))
 		if matches == nil {
-			result.Decisions[index] = blocked(file.RelativePath, "FILENAME_PATTERN_MISMATCH", nil, Evidence{Context: &context}, "The filename does not exactly match the Phase 0 [NN].mkv convention.")
+			result.Decisions[index] = blocked(file.RelativePath, "FILENAME_PATTERN_MISMATCH", nil, Evidence{Context: &context}, "The filename does not exactly match the supported [NN].mkv convention.")
 			continue
 		}
 

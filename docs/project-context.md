@@ -1,6 +1,6 @@
 # Project Context
 
-This document records the original product problem, goals, and proposed design for `sonarr-torrent-importer`. It is the source of truth for product motivation and design hypotheses, not for validated implementation behavior. The evidence-based MVP boundaries and corrections belong in [`concept-review.md`](concept-review.md), while packaging and release rules belong in [`releases.md`](releases.md).
+This document records the original product problem, goals, and proposed design for `sonarr-torrent-importer`. It is the source of truth for product motivation and historical design hypotheses, not for validated implementation behavior. The implemented contract belongs in [`README.md`](../README.md), historical corrections remain in [`concept-review.md`](concept-review.md), and packaging rules belong in [`releases.md`](releases.md).
 
 ## Summary
 

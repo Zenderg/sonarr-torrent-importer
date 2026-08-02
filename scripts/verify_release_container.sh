@@ -3,11 +3,13 @@ set -eu
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 project_name="sonarr-importer-release-check-$$"
-image="ghcr.io/zenderg/sonarr-torrent-importer:${IMPORTER_VERSION:-release-smoke}"
+dev_tag="${IMPORTER_DEV_TAG:-release-smoke}"
+image="sonarr-torrent-importer:$dev_tag"
 invalid_log=$(mktemp)
 
 export IMPORTER_ENV_FILE="${IMPORTER_ENV_FILE:-.env.example}"
 export IMPORTER_VERSION="${IMPORTER_VERSION:-release-smoke}"
+export IMPORTER_DEV_TAG="$dev_tag"
 export IMPORTER_HOST_PORT="${IMPORTER_HOST_PORT:-0}"
 export BUILD_VERSION="${BUILD_VERSION:-release-smoke}"
 export BUILD_COMMIT_SHA="${BUILD_COMMIT_SHA:-release-check}"

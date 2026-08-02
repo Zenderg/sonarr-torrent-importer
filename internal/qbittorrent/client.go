@@ -130,6 +130,16 @@ func (c *Client) Files(ctx context.Context, hash string) ([]File, error) {
 	return files, nil
 }
 
+func (c *Client) RenameFile(ctx context.Context, hash, oldPath, newPath string) error {
+	form := url.Values{
+		"hash":    {hash},
+		"oldPath": {oldPath},
+		"newPath": {newPath},
+	}
+	_, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/renameFile", nil, strings.NewReader(form.Encode()), "application/x-www-form-urlencoded")
+	return err
+}
+
 func (c *Client) do(ctx context.Context, method, endpoint string, query url.Values, body io.Reader, contentType string) ([]byte, error) {
 	requestURL := c.resolve(endpoint)
 	if len(query) > 0 {

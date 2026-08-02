@@ -1,25 +1,31 @@
 # sonarr-torrent-importer
 
-Консервативный импортёр завершённых qBittorrent-раздач в Sonarr с явным сопоставлением файлов эпизодам. `v0.1.0` — ручной Phase 0 workflow для строгих имён `[NN].mkv` в подтверждённом Sonarr season context.
+Надёжный импорт завершённых qBittorrent-раздач, в которых файлы названы как `[01].mkv`, `[02].mkv` и поэтому не распознаются Sonarr автоматически.
 
-Импортёр не переименовывает, не перемещает и не удаляет torrent-файлы. qBittorrent используется только для чтения manifest; все пути и import decisions повторно подтверждает Sonarr.
+Импортёр получает точный series/season context из очереди Sonarr, сопоставляет каждый `[NN].mkv` одному episode ID, строит понятное Sonarr имя вроде `Futurama.S01E01.WEBDL-720p.mkv` и переименовывает файл через Web API qBittorrent. После этого Sonarr штатно импортирует файл; успех подтверждается одновременно по history, episode state и episode-file metadata. Раздача остаётся в qBittorrent и продолжает сидироваться.
 
-## Границы Phase 0
+## Поддерживаемый сценарий
 
 - Sonarr v4.
-- qBittorrent Web API 2.8.2 или новее.
-- Один явно выбранный `downloadId`; `queueId` можно использовать в dry run, чтобы разрешить соответствующий `downloadId`.
-- Только точный шаблон `[01].mkv` … `[99].mkv`, включая файлы внутри torrent folder.
-- Dry run по умолчанию; execute требует точного подтверждения `downloadId` и неизменившийся `planToken` из dry run.
-- До импорта повторно проверяются queue context, manual-import payload, episode metadata и hash manifest.
-- Успех подтверждается одновременно новой Sonarr history, episode state и episode-file metadata.
-- Queue финализируется через Sonarr без удаления torrent; после этого manifest и активный seeding проверяются ещё раз.
+- qBittorrent v5 и Web API 2.11.0 или новее.
+- Явно выбранный torrent `downloadId`; `queueId` можно использовать в dry run для разрешения соответствующего hash.
+- Multi-file torrent с файлами `[01].mkv` … `[99].mkv` внутри стабильного torrent root.
+- Один точный episode match на каждый выбранный завершённый media file.
+- Активное состояние seeding: `uploading`, `stalledUP` или `forcedUP`.
 
-Write-ahead intent и последний operation result атомарно хранятся под `/data`; межпроцессный lock не допускает параллельные execute. После неопределённого ответа mutation не повторяется вслепую: следующий execute с теми же `downloadId` и `planToken` продолжает проверку postconditions. SQLite audit history, стандартные `SxxEyy`, absolute/date patterns, polling и review API относятся к следующим этапам.
+Single-file torrents, folder rename, case-only rename, неоднозначные episode mappings и уже занятые canonical paths блокируются до любых изменений. Импортёр не удаляет torrent и не меняет содержимое файла; меняется только имя torrent file через qBittorrent.
+
+## Гарантии выполнения
+
+Dry run ничего не изменяет и возвращает исходный и canonical path каждого файла. Execute требует точного `downloadId`, повторного `confirmDownloadId` и неизменившегося `planToken`.
+
+Перед каждой мутацией сохраняется write-ahead operation record под `/data`. HTTP 200 от qBittorrent не считается доказательством: importer опрашивает manifest и подтверждает новый path по стабильному file index, size, progress и priority. После рестарта незавершённая операция продолжается по тому же token без повторения уже доказанного rename или Sonarr command.
+
+После canonical rename importer ждёт штатный completed-download import Sonarr. Если Sonarr не завершил его за `COMMAND_TIMEOUT`, importer заново получает canonical manual-import candidates и использует проверенный explicit mapping. В обоих случаях финальный успех требует нового `downloadFolderImported` history record, ожидаемого episode file, пустой queue и сохранённой seeding-раздачи с canonical manifest.
 
 ## Запуск
 
-Скачайте `compose.example.yaml` и `.env.example` из GitHub Release `v0.1.0`, затем заполните реальные endpoints и credentials:
+Скачайте `compose.example.yaml` и `.env.example` из GitHub Release `v1.0.0`, затем заполните endpoints и credentials:
 
 ```bash
 cp .env.example .env
@@ -27,9 +33,9 @@ docker compose -f compose.example.yaml pull
 docker compose -f compose.example.yaml up -d
 ```
 
-Compose использует versioned image `ghcr.io/zenderg/sonarr-torrent-importer:v0.1.0`, запускает его без root и сохраняет safety journal в named volume. `/data` должен быть обычным локальным Docker volume или локальным bind mount с рабочими `flock`, atomic rename и `fsync`; NFS/CIFS для `v0.1.0` не поддерживаются.
+Compose использует образ `ghcr.io/zenderg/sonarr-torrent-importer:v1.0.0`, запускает контейнер без root и сохраняет operation journal в named volume. `/data` должен находиться на локальном Docker volume или bind mount с корректными `flock`, atomic rename и `fsync`; NFS/CIFS не поддерживаются.
 
-HTTP API слушает только localhost в Compose-примере. У API нет собственной аутентификации, поэтому публиковать порт в недоверенную сеть нельзя.
+HTTP API в примере слушает только localhost. У сервиса нет собственной аутентификации, поэтому его порт нельзя публиковать в недоверенную сеть.
 
 Проверка состояния:
 
@@ -46,7 +52,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/imports/dry-run \
   -d '{"downloadId":"<torrent-info-hash>"}'
 ```
 
-Dry run с `queueId` вернёт разрешённый `selection.downloadId`, `context.downloadId` и `planToken`. Execute всегда использует этот `downloadId`, повторяет его в `confirmDownloadId` и передаёт неизменённый token:
+Execute использует `selection.downloadId` и `planToken` из проверенного dry run:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/api/v1/imports/execute \
@@ -54,7 +60,9 @@ curl -X POST http://127.0.0.1:8080/api/v1/imports/execute \
   -d '{"downloadId":"<torrent-info-hash>","confirmDownloadId":"<torrent-info-hash>","planToken":"sha256:<dry-run-token>"}'
 ```
 
-Одноразовый CLI использует ту же конфигурацию и те же safety checks:
+Не запускайте execute, пока dry run не вернул `outcome: "ready"`, `canExecute: true`, ожидаемые `episodeIds` и правильные `rename.fromPath`/`rename.toPath` для каждого media file.
+
+Одноразовый CLI использует тот же workflow:
 
 ```bash
 docker compose -f compose.example.yaml run --rm importer \
@@ -66,22 +74,18 @@ docker compose -f compose.example.yaml run --rm importer \
   --plan-token 'sha256:<dry-run-token>'
 ```
 
-Не запускайте execute, пока dry run не вернул `outcome: "ready"`, `canExecute: true` и ожидаемые `episodeIds` для каждого media file. Если plan изменился, execute завершится с `DRY_RUN_PLAN_CHANGED` без mutation — выполните новый dry run и снова проверьте результат.
-
-## Сборка из checkout
-
-Путь для разработки использует отдельный Compose override:
+## Разработка и проверка
 
 ```bash
-cp .env.example .env
-docker compose -f compose.example.yaml -f compose.dev.yaml up -d --build
+cp integration.env.example .env
+./scripts/run_integration_e2e.sh
 ```
 
-Production deployment не должен подключать `compose.dev.yaml`.
+E2E script поднимает отдельный Compose stack с закреплёнными tag и digest Sonarr/qBittorrent, создаёт реальный 301-секундный media fixture и отправляет torrent через Sonarr release push. Во время qBittorrent rename он принудительно перезапускает importer, затем доказывает восстановление по тому же token без повторного rename, Sonarr auto-import, history/episode-file, post-import category, queue finalization и active seeding. Добавление Futurama использует штатный внешний metadata lookup Sonarr, поэтому для E2E нужен доступ в интернет.
 
-## Документация
+Подробности:
 
-- [Контекст и исходная концепция](docs/project-context.md)
-- [Ревью концепции и рекомендуемый MVP](docs/concept-review.md)
+- [Разработка и локальный integration stack](docs/development.md)
 - [Контракт релизов и Docker-образа](docs/releases.md)
-- [Разработка и интеграционные границы](docs/development.md)
+- [Исходный продуктовый контекст](docs/project-context.md)
+- [Историческое ревью концепции](docs/concept-review.md)

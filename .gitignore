@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 /data/
+/.integration-fixtures/
 *.db
 *.db-shm
 *.db-wal
