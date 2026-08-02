@@ -200,8 +200,8 @@ jobs:
           grep -F 'Platform:    linux/amd64' <<< "$manifest"
           grep -F 'Platform:    linux/arm64' <<< "$manifest"
           docker pull --platform linux/amd64 "$IMAGE_NAME@$digest"
-          test "$(docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' "$IMAGE_NAME@$digest")" = "$GITHUB_SHA"
-          test "$(docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.version\" }}' "$IMAGE_NAME@$digest")" = "$GITHUB_REF_NAME"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE_NAME@$digest")" = "$GITHUB_SHA"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$IMAGE_NAME@$digest")" = "$GITHUB_REF_NAME"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Create draft GitHub Release
         env:
