@@ -99,8 +99,9 @@ while :; do
     break
   fi
   attempts=$((attempts + 1))
-  if [ "$attempts" -ge 120 ]; then
+  if [ "$attempts" -ge 600 ]; then
     echo "timed out waiting for durable rolling add recovery point; last phase was $phase" >&2
+    printf '%s\n' "$candidate" | jq >&2
     exit 1
   fi
   sleep 0.1

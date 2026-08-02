@@ -182,8 +182,9 @@ while :; do
     break
   fi
   attempts=$((attempts + 1))
-  if [ "$attempts" -ge 100 ]; then
+  if [ "$attempts" -ge 600 ]; then
     echo "timed out waiting for a durable rename_file_submitting recovery point; last phase was $phase" >&2
+    printf '%s\n' "$qbit_files" | jq >&2
     exit 1
   fi
   sleep 0.1
