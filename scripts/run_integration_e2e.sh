@@ -181,6 +181,25 @@ while :; do
     recovery_phase=$phase
     break
   fi
+  if ! kill -0 "$execute_pid" 2>/dev/null; then
+    execute_status=0
+    wait "$execute_pid" || execute_status=$?
+    execute_pid=
+    echo "execute ended with status $execute_status before the rename recovery point" >&2
+    if [ -s "$execute_error_file" ]; then
+      echo "execute stderr:" >&2
+      sed 's/^/  /' "$execute_error_file" >&2
+    fi
+    if [ -s "$execute_file" ]; then
+      echo "execute response:" >&2
+      sed 's/^/  /' "$execute_file" >&2
+    fi
+    echo "qBittorrent manifest:" >&2
+    printf '%s\n' "$qbit_files" | jq >&2
+    echo "importer logs:" >&2
+    integration_compose logs --no-color importer >&2
+    exit 1
+  fi
   attempts=$((attempts + 1))
   if [ "$attempts" -ge 600 ]; then
     echo "timed out waiting for a durable rename_file_submitting recovery point; last phase was $phase" >&2

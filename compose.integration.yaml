@@ -7,11 +7,13 @@ services:
       DEV_PGID: ${DEV_PGID:-1000}
     volumes:
       - integration-media:/media
+      - ${INTEGRATION_FIXTURE_HOST_PATH:-./.integration-fixtures}/downloads:/fixture-downloads
     entrypoint: ["/bin/sh", "-eu", "-c"]
     command:
       - |
-        mkdir -p /media/library /media/incomplete
-        chown -R "$${DEV_PUID}:$${DEV_PGID}" /media
+        mkdir -p /media/library /media/incomplete /fixture-downloads
+        chown -R "$${DEV_PUID}:$${DEV_PGID}" /media /fixture-downloads
+        chmod -R u+rwX,g+rwX /fixture-downloads
 
   sonarr-config:
     image: alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
